@@ -112,16 +112,20 @@ class Handler(BaseHTTPRequestHandler):
                 "css": "text/css", "svg": "image/svg+xml", "json": "application/json",
                 "wasm": "application/wasm", "onnx": "application/octet-stream"}.get(
             name.rsplit(".", 1)[-1], "text/plain")
+        # A charset only means something for text. On the wasm file it made the type "application/wasm;
+        # charset=utf-8", which the browser's fast streaming compile refuses as the wrong type.
+        if kind.startswith("text/") or kind in ("application/json", "image/svg+xml"):
+            kind += "; charset=utf-8"
         body = path.read_bytes()
         self.send_response(200)
-        self.send_header("Content-Type", f"{kind}; charset=utf-8")
+        self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(body)))
-        # Without this the browser keeps the copy it already has, and an edited page or script never
-        # reaches the person testing it — they debug yesterday's code and nothing they try makes a
-        # difference. The vendored model is the one thing worth keeping, since it never changes.
-        # `name` arrives already stripped of "/static/", so it reads "vendor/…" with no leading slash.
-        vendored = name.replace("\\", "/").startswith("vendor/")
-        self.send_header("Cache-Control", "public, max-age=86400" if vendored else "no-store")
+        # The page itself is never cached, so a rebuilt UI reaches the person testing it on the next
+        # reload. What it loads can be: the build names every file in assets/ after its contents, so an
+        # edit arrives under a new name, and the vendored voice model never changes.
+        # `name` has no leading slash: "assets/…", "vendor/…", "index.html".
+        lasting = name.replace("\\", "/").startswith(("assets/", "vendor/"))
+        self.send_header("Cache-Control", "public, max-age=86400" if lasting else "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -154,10 +158,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         route = urlparse(self.path).path
         try:
-            if route in ("/", "/setup", "/call"):
-                return self.send_file("index.html")     # one page: the tab is chosen in the browser
-            if route.startswith("/static/"):
-                return self.send_file(route.removeprefix("/static/"))
+            if route in ("/", "/setup", "/call", "/history"):
+                return self.send_file("index.html")     # one page: the page shown is chosen in the browser
+            # The built UI (frontend/, built into web/): its scripts and styles, the voice model, the icon.
+            if route.startswith(("/assets/", "/vendor/")) or route == "/favicon.svg":
+                return self.send_file(route.removeprefix("/"))
             if route == "/api/setup":
                 return self.send_json(storage.load_setup().model_dump())
             if route == "/api/calls":
@@ -311,6 +316,7 @@ def serve(port: int = 8000, open_browser: bool = True):
     print(f"Voice Call is running at {address}")
     print("  /        set up your business")
     print("  /call    make a test call")
+    print("  /history past calls")
     print("Press Ctrl+C to stop.")
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(address)).start()

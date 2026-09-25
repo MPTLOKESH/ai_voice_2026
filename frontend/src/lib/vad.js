@@ -4,7 +4,7 @@
  * different question from "is this loud", which is what a level meter answers and why a fan, a television or
  * traffic used to hold a turn open forever: all of them are loud, none of them is a voice.
  *
- * The model and the runtime are served from /static/vendor/, so starting a call needs nothing from the
+ * The model and the runtime are served from /vendor/, so starting a call needs nothing from the
  * internet.
  *
  * Every step reports itself through `onNote`, and nothing is swallowed: if a turn is not sent, the call log
@@ -13,7 +13,7 @@
 
 import { toWav } from "./audio.js";
 
-const VENDOR = "/static/vendor/";
+const VENDOR = "/vendor/";
 export const MIC_RATE = 16000;            // what the model works at, and what we send to the server
 
 const TUNING = {

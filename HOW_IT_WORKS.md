@@ -62,9 +62,10 @@ comes next, and whether the call ends. That keeps the call predictable, however 
 | **ElevenLabs Flash** (`eleven_flash_v2_5`) | Speaking | Built for low delay: the first audio arrives well under a second after the text is sent. It streams raw audio the browser can play as it arrives, and handles Hindi, Tamil and other languages. |
 | **ElevenLabs Scribe** (`scribe_v1`) | Hearing (speech to text) | Accurate across many languages, including Indian ones. Told not to write sounds like "(music)" into the text, so noise isn't mistaken for words. |
 | **Silero VAD** (runs in the browser) | Deciding when someone is speaking, and when they have finished | It asks "is this a *voice*?", not "is this *loud*?", so fans, TVs and traffic don't hold a turn open. It runs on the caller's own computer in under a millisecond per frame, so no audio is sent anywhere just to decide that. |
-| **ONNX Runtime Web** | Runs the Silero model in the browser | The standard way to run a small neural network in a web page. Bundled in `web/vendor/` so a call needs nothing from the internet. |
+| **ONNX Runtime Web** 1.22.0 | Runs the Silero model in the browser | The standard way to run a small neural network in a web page. Kept in `frontend/public/vendor/` so a call needs nothing from the internet. Its version must match the one built into the VAD wrapper (`bundle.min.js`), or Silero fails to start and calls quietly fall back to the loudness detector. |
 | **Web Audio API** | Playing the reply and recording the microphone | Built into every browser. Its echo cancellation stops the assistant's own voice being heard as the customer, which is what lets you interrupt on speakers, not just headphones. |
-| **Plain JavaScript modules** | The pages | No build step: edit a file, reload the page. |
+| **React + Tailwind CSS**, built with **Vite** | The pages | Components keep a form this size manageable, and Tailwind keeps the design system in one theme. Vite builds it into `web/`, which the Python server serves, so running the app needs no Node. Only changing the UI does. |
+| **lucide-react** | Icons | Thin line icons, one consistent style. |
 | **python-dotenv** | Reading the API keys from `.env` | Keeps keys out of the code and out of git. |
 
 ---
@@ -85,15 +86,21 @@ voice_call/
   suggestions.py  "Suggest questions" on the setup page
   storage.py      reading and writing the setup and finished calls
   server.py       the HTTP server: pages, API, streamed replies
-web/
-  index.html · styles.css
-  js/app.js       starts the page
-  js/setup.js     the setup form
-  js/call.js      the call: turns, interruptions, the live view
-  js/vad.js       Silero voice detection
-  js/audio.js     the player, and the older loudness-based detector used as a fallback
-  js/api.js       every request to the server
-  vendor/         Silero model and ONNX Runtime, bundled
+frontend/                     the browser UI (React + Tailwind), built into web/
+  src/App.jsx                 the shell: top bar, tab bar, which page is showing
+  src/components/layout/      TopBar · TabBar · the slot each page puts its actions in
+  src/components/setup/       the setup form, a section at a time, and the question editor
+  src/components/call/        a test call: start panel, conversation, answers, decision log
+  src/components/history/     finished calls
+  src/components/ui/          buttons, cards, fields, toasts, menus
+  src/lib/callSession.js      the call: turns, interruptions, the clock (plain JS, drawn by React)
+  src/lib/setupForm.js        the form's defaults, limits and checks
+  src/lib/vad.js              Silero voice detection
+  src/lib/audio.js            the player, and the loudness-based detector used as a fallback
+  src/lib/api.js              every request to the server
+  src/index.css               the design tokens: colours, fonts
+  public/vendor/              Silero model and ONNX Runtime, copied into the build as they are
+web/                          the built UI the server sends (made by `npm run build`; don't edit)
 config/business.json   your setup (written by Save, not in git)
 data/calls/            one JSON file per finished call (not in git)
 ```
@@ -327,6 +334,7 @@ or the goodbye, so it never sounds out of step with the conversation.
 | The default voice, or the speech models | `ELEVEN_*` in `settings.py` |
 | When hurrying starts, and how much a goodbye needs | `HURRY_SHARE`, `HURRY_SECONDS`, `SECONDS_PER_EXCHANGE` in `settings.py` |
 | How much conversation the model sees | `RECENT_TURNS` in `settings.py` |
-| How sensitive voice detection and interrupting are | `TUNING`, `INTERRUPT_AFTER`, `INTERRUPT_CHANCE` in `web/js/vad.js` |
+| How sensitive voice detection and interrupting are | `TUNING`, `INTERRUPT_AFTER`, `INTERRUPT_CHANCE` in `frontend/src/lib/vad.js` |
+| How the pages look | `frontend/src/` (then `npm run build`); colours and fonts in `frontend/src/index.css` |
 | What is saved for each call | `save_call` in `storage.py` |
 | The rules for saving answers or ending a call | `keep_answers`, `next_step` in `engine.py` |

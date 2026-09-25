@@ -37,6 +37,13 @@ export async function services() {
   return (await response.json()).models;
 }
 
+/** Finished calls, newest first, as saved in data/calls/. */
+export async function recentCalls() {
+  const response = await fetch("/api/calls");
+  if (!response.ok) throw new Error("could not load past calls");
+  return (await response.json()).calls || [];
+}
+
 /**
  * Start a call, or answer within one.
  *

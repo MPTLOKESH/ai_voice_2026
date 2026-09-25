@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+/* The whole palette. One confident indigo carries the brand: the main action, what's selected, what's in
+   focus, the customer's side of a call. Each setup section has its own soft tint so it's recognisable at a
+   glance. Green, red and amber keep their meanings: done or "your turn", ending, a warning. No gradients. */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --color-canvas: #f7f7fa;
+  --color-fill: #f4f4f5;
+  --color-ink: #111113;
+  --color-body: #3f3f46;
+  --color-muted: #71717a;
+  --color-line: #e4e4e7;
+  --color-edge: #d4d4d8;
+  --color-hover: #f4f4f5;
+  --color-active: #ececee;
+
+  --color-brand: #635bff;
+  --color-brand-hover: #5046e5;
+  --color-brand-ink: #4338ca;
+  --color-brand-soft: #efeeff;
+
+  --color-good: #15803d;
+  --color-good-soft: #f0fdf4;
+  --color-live: #22c55e;
+  --color-bad: #dc2626;
+  --color-bad-soft: #fef2f2;
+  --color-warn: #b45309;
+  --color-warn-soft: #fffbeb;
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.04);
+  --shadow-float: 0 0 0 1px rgb(0 0 0 / 0.06), 0 12px 32px -12px rgb(0 0 0 / 0.18);
+}
+
+@layer base {
+  html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+  body { @apply bg-canvas font-sans text-body; font-feature-settings: "cv11", "ss01"; }
+  ::selection { background: rgb(99 91 255 / 0.18); }
+}
+
+/* Frosted glass, for the bars that float over the page as it scrolls beneath them. */
+@utility glass {
+  background-color: rgb(255 255 255 / 0.8);
+  backdrop-filter: saturate(180%) blur(16px);
+  -webkit-backdrop-filter: saturate(180%) blur(16px);
+}
+
+@utility no-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar { display: none; }
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(1); opacity: 0.45; }
+  100% { transform: scale(1.9); opacity: 0; }
+}
+@utility animate-pulse-ring {
+  animation: pulse-ring 1.4s ease-out infinite;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+}

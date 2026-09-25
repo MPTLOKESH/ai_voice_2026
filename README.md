@@ -13,9 +13,28 @@ python -m voice_call
 ```
 
 It opens `http://127.0.0.1:8000`. Your `GEMINI_API_KEY` is read from a `.env` file in this folder or the one
-above it. Nothing needs installing beyond `requirements.txt` — the server uses Python's own standard library.
+above it. Nothing needs installing beyond `requirements.txt`: the server uses Python's own standard library,
+and the browser UI is already built into `web/`.
 
-## The two pages
+## Changing the UI
+
+The pages are React + Tailwind CSS in `frontend/`. You need Node.js 20 or newer, but only to change them:
+
+```bash
+cd frontend
+npm install          # once
+npm run dev          # http://localhost:5173, reloads as you edit; keep `python -m voice_call` running for /api
+npm run build        # writes the finished UI into ../web, which the Python server sends
+```
+
+Commit `web/` after building, so the app still runs with Python alone. Colours and fonts are the design
+tokens at the top of `frontend/src/index.css`.
+
+## The pages
+
+Tabs in the bar across the top switch between them (on phones, a tab bar along the bottom), and the top
+bar holds the actions for the page you're on.
+Everything is laid out for phones as well.
 
 **Set up** (`/`) — everything a business decides:
 
@@ -40,6 +59,10 @@ two sets.
 says so rather than acting if the form is already empty. Nothing is written until you press Save, so the
 setup already on disk — and any call you start meanwhile — is untouched by it.
 
+One section shows at a time: pick it from the list beside it (a row of chips on phones), or step through
+them with the buttons underneath. Questions are a list of rows; click one to edit it. Unsaved changes are
+flagged in the top bar, and they survive a look at another page.
+
 **Test call** (`/call`) — a conversation, not a walkie-talkie:
 
 - **Hands free.** It listens while you speak, works out when you have finished, and replies. There is no
@@ -51,6 +74,10 @@ setup already on disk — and any call you start meanwhile — is untouched by i
 - **Timings per turn**: heard, thought, spoke.
 - *End call* and *Say nothing* stand in for things a customer does: hanging up, and a turn where nobody
   spoke. Untick *Speak out loud* to test the logic without spending speech requests.
+- **Leave the page mid-call** and the call carries on; its tab is marked with a live dot.
+
+**Call history** (`/history`) — every finished call, newest first, with its outcome, length and summary.
+Open one to see the answers it saved.
 
 ## Why it feels quick
 
@@ -89,8 +116,11 @@ voice_call/
   suggestions.py  questions from a purpose
   storage.py      the setup, and finished calls
   server.py       the browser UI
-web/
-  index.html · styles.css · js/ (app · setup · call · audio · api · ui)
+frontend/          the browser UI: React + Tailwind, built with Vite
+  src/components/  layout (top bar, tab bar) · setup · call · history · ui (buttons, fields, cards)
+  src/lib/         callSession (a call's turns and interruptions) · setupForm · vad · audio · api
+  public/vendor/   Silero model and ONNX Runtime
+web/               the built UI the server sends (from `npm run build`; don't edit by hand)
 config/business.json   your setup, written by the Save button
 data/calls/            one file per call
 ```
@@ -124,7 +154,8 @@ are loud, but none of them is a voice. Only speech is sent to be transcribed.
 It runs entirely in the browser, on the CPU, in well under a millisecond per frame. Nothing is sent anywhere
 to make the decision.
 
-The model and its runtime live in `web/vendor/` rather than being fetched from a CDN, so starting a call
+The model and its runtime live in `frontend/public/vendor/` (copied into `web/vendor/` by the build) rather
+than being fetched from a CDN, so starting a call
 needs nothing from the internet:
 
 | file | what it is |
@@ -132,13 +163,17 @@ needs nothing from the internet:
 | `silero_vad_v5.onnx` | the voice detector itself (2.2 MB), chosen by `model: "v5"` |
 | `silero_vad_legacy.onnx` | the wrapper's own default model, kept so a missing option can't break startup |
 | `bundle.min.js`, `vad.worklet.bundle.min.js` | `@ricky0123/vad-web` 0.0.31, the browser wrapper |
-| `ort.wasm.min.js`, `ort-wasm-simd-threaded.*` | ONNX Runtime 1.20.1, which runs the model |
+| `ort.wasm.min.js`, `ort-wasm-simd-threaded.*` | ONNX Runtime 1.22.0, which runs the model |
 
 To fetch them again, take those names from
 `https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.31/dist/` and
-`https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/`.
+`https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/`.
 
-Thresholds are in `web/js/vad.js`: `positiveSpeechThreshold` is how sure the model must be before a turn
+The runtime's version must match the one built into `bundle.min.js` (vad-web 0.0.31 carries 1.22.0).
+With a mismatch the model fails to start with `t.getValue is not a function`, and every call quietly falls
+back to the loudness test. The decision log says which one a call is using.
+
+Thresholds are in `frontend/src/lib/vad.js`: `positiveSpeechThreshold` is how sure the model must be before a turn
 starts, and `redemptionMs` how long a silence must last before the turn is sent. If the model can't be
 loaded, the call falls back to the old loudness test and says so.
 
