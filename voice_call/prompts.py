@@ -138,6 +138,16 @@ STEP_TASKS = {
                "again — differently from the way you put it last time.",
     "goodbye": "You have everything you need. Take in what they just said in a few words, thank them and say "
                "goodbye. Ask nothing else.",
+    # Messages the business wants said. They are told in the model's own words, so they sound like the rest of
+    # the call, and they come first: what they say goes before the question it leads into.
+    "say_then_ask": "First tell them, briefly and in your own words: {message} Then ask: {question}",
+    "say_then_confirm": "First tell them, briefly and in your own words: {message} Then: {confirm}",
+    "say_then_goodbye": "Take in what they just said in a few words. Then tell them, briefly and in your own "
+                        "words: {message} Then thank them and say goodbye. Ask nothing else.",
+    "end_early": "This call ends here. Take in what they just said in a few words, thank them and say goodbye. "
+                 "Ask nothing else.",
+    "handoff": "A colleague needs to take this from here. Take in what they just said in a few words, tell "
+               "them someone from the team will be in touch, thank them and say goodbye. Ask nothing else.",
 }
 
 # Wrapped round the task when the customer talked over the last reply. Handed only "Ask: …", the model
@@ -155,6 +165,11 @@ answers empty unless they actually gave one."""
 
 # Added to the turn once the call is near its time limit.
 HURRY = " Time is nearly up: about {left} seconds left, so keep this reply as short as you can."
+
+# Said with the last question when a message is still to be told after it.
+LAST_QUESTION_SAY = (" This is the last thing you need, and then there is something to tell them: once they give "
+                     "a usable answer, don't ask anything more. Tell them, briefly and in your own words: "
+                     "{message} Then thank them and say goodbye, in that same reply.")
 
 # Added to the task when no read-back follows, so the goodbye comes in the same reply as the last answer.
 LAST_QUESTION = (" This is the last thing you need: once they give a usable answer, don't ask anything more. "
@@ -175,11 +190,23 @@ SUGGEST_QUESTIONS_PROMPT = """\
 A voice assistant for {business_name} will call customers.
 Purpose: {purpose}
 Business information: {business_info}
+Questions it already asks: {already}
 
 Suggest 3 to 5 questions it should ask, most important first, written in {language}. Keep a call short.
 Mark the essential ones as required. Give each a sensible type and a rule for an acceptable answer that uses
 the business information where it helps. Don't ask for things the business already knows, like the customer's
-name or phone number."""
+name or phone number. Never repeat, or rephrase, a question it already asks: suggest only new ones."""
+
+
+REWORD_PROMPT = """\
+A voice assistant for {business_name} says this on a phone call{kind}, in {language}:
+"{text}"
+
+Why it is calling: {purpose}
+
+Write {count} other ways to say it. Each must mean the same thing, be easy to say aloud and to follow by ear, and
+stay under about {words} words. Make them genuinely different from one another and from the original: one
+warmer, one more direct. No lists, symbols or emojis."""
 
 
 SUMMARY_PROMPT = """\

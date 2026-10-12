@@ -117,11 +117,11 @@ voice_call/
   storage.py      the setup, and finished calls
   server.py       the browser UI
 frontend/          the browser UI: React + Tailwind, built with Vite
-  src/components/  layout (top bar, tab bar) · setup · call · history · ui (buttons, fields, cards)
+  src/components/  layout (rail, tab bar) · drafts · studio · voices · call · history · ui (buttons, fields, cards)
   src/lib/         callSession (a call's turns and interruptions) · setupForm · vad · audio · api
   public/vendor/   Silero model and ONNX Runtime
 web/               the built UI the server sends (from `npm run build`; don't edit by hand)
-config/business.json   your setup, written by the Save button
+config/flows/          your flows (setups), saved as you edit them
 data/calls/            one file per call
 ```
 

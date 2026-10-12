@@ -10,16 +10,20 @@ Built on the standard library, so nothing extra needs installing. Run it with:  
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 import traceback
 import webbrowser
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
-from . import engine, gemini, settings, storage, voices
-from .models import BusinessSetup, Call
-from .suggestions import suggest_questions
+from pydantic import ValidationError
+
+from . import contacts, engine, gemini, results, settings, sources, storage, voices
+from .models import KEPT_VERSIONS, BusinessSetup, Call, Version
+from .suggestions import reword, suggest_questions
 
 calls: dict[str, Call] = {}
 lock = threading.Lock()
@@ -41,7 +45,7 @@ take_notices = gemini.take_notices
 def check_setup(setup: BusinessSetup) -> list[str]:
     """Plain rules, so a broken setup fails here rather than in front of a customer."""
     problems = []
-    if not setup.questions:
+    if not any(q.kind == "ask" for q in setup.questions):
         problems.append("Add at least one question.")
     if not setup.purpose.strip():
         problems.append("Say what the call is for.")
@@ -51,17 +55,29 @@ def check_setup(setup: BusinessSetup) -> list[str]:
     for q in setup.questions:
         if not q.save_as.isidentifier():
             problems.append(f"'{q.save_as}': use letters, numbers and underscores only.")
-        if q.type == "choice" and len(q.options) < 2:
+        if q.kind == "ask" and q.type == "choice" and len(q.options) < 2:
             problems.append(f"'{q.save_as}': a choice needs at least two options.")
+        if q.kind == "say" and not q.ask.strip():
+            problems.append(f"'{q.save_as}': write what it should say.")
+        if q.kind == "end" and not q.only_if:
+            problems.append(f"'{q.save_as}': an end step needs a condition, or it would end every call.")
     for at, q in enumerate(setup.questions):
         if not q.only_if:
             continue
         # Only an earlier question, so no two questions can each wait for the other.
-        if q.only_if not in names[:at]:
+        above = [other.save_as for other in setup.questions[:at] if other.kind == "ask"]
+        if q.only_if not in above:
             problems.append(f"'{q.save_as}' can only depend on a question above it.")
         elif not q.only_if_is:
             problems.append(f"'{q.save_as}': say which answer to '{q.only_if}' it is asked after.")
     return problems
+
+
+def explain(failure: ValidationError) -> str:
+    """The first thing wrong with a setup, in a line: "speaking_speed: Input should be less than or equal to 1.2"."""
+    first = failure.errors()[0]
+    where = ".".join(str(part) for part in first["loc"])
+    return f"{where}: {first['msg']}" if where else first["msg"]
 
 
 REMEMBER_CALLS = 20        # finished calls kept in memory, so the page can still read them
@@ -156,17 +172,28 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── pages ────────────────────────────────────────────────────────────────
     def do_GET(self):
-        route = urlparse(self.path).path
+        url = urlparse(self.path)
+        route = url.path
         try:
-            if route in ("/", "/setup", "/call", "/history"):
+            if route in ("/", "/drafts", "/studio", "/voices", "/call", "/history", "/contacts", "/results"):
                 return self.send_file("index.html")     # one page: the page shown is chosen in the browser
             # The built UI (frontend/, built into web/): its scripts and styles, the voice model, the icon.
             if route.startswith(("/assets/", "/vendor/")) or route == "/favicon.svg":
                 return self.send_file(route.removeprefix("/"))
-            if route == "/api/setup":
-                return self.send_json(storage.load_setup().model_dump())
+            if route == "/api/flows":
+                return self.send_json({"flows": [flow.model_dump() for flow in storage.list_flows()]})
             if route == "/api/calls":
-                return self.send_json({"calls": storage.recent_calls()})
+                query = {key: values[0] for key, values in parse_qs(url.query).items()}
+                return self.send_json(storage.recent_calls(
+                    limit=min(max(int(query.get("limit") or 20), 1), 100), offset=max(int(query.get("offset") or 0), 0),
+                    flow=query.get("flow", ""), outcome=query.get("outcome", ""), contact=query.get("contact", "")))
+            if route == "/api/contacts" or route.startswith("/api/contacts/"):
+                return self.contacts_read(route.removeprefix("/api/contacts").strip("/"),
+                                          {key: values[0] for key, values in parse_qs(url.query).items()})
+            if route == "/api/stats":
+                return self.send_json(results.stats())
+            if route.startswith("/api/flows/") and route.count("/") == 4:
+                return self.flow_read(route.split("/")[3], route.split("/")[4])
             if route == "/api/models":
                 return self.send_json({"models": gemini.current})
             if route == "/api/voices":
@@ -180,14 +207,25 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         route = urlparse(self.path).path
         try:
-            if route == "/api/setup":
-                setup = BusinessSetup(**self.body())
-                storage.save_setup(setup)
-                return self.send_json({"saved": True, "setup": setup.model_dump()})
+            if route == "/api/flows":
+                data = self.body()
+                setup = BusinessSetup(**data["setup"]) if data.get("setup") else None
+                return self.send_json(storage.new_flow(data.get("name") or "Untitled flow", setup).model_dump())
+
+            if route.startswith("/api/flows/"):
+                return self.flow_action(route.removeprefix("/api/flows/"))
+
+            if route == "/api/contacts" or route.startswith("/api/contacts/"):
+                return self.contacts_action(route.removeprefix("/api/contacts").strip("/"))
 
             if route == "/api/suggest":
                 found = suggest_questions(BusinessSetup(**self.body()))
                 return self.send_json({"questions": [q.model_dump() for q in found], "notices": take_notices()})
+
+            if route == "/api/suggest/reword":
+                data = self.body()
+                options = reword(BusinessSetup(**data["setup"]), data.get("text") or "", data.get("kind") or "ask")
+                return self.send_json({"options": options, "notices": take_notices()})
 
             if route == "/api/hear":
                 return self.hear_voice()
@@ -199,6 +237,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.take_turn()
 
             return self.send_json({"error": "unknown route"}, 404)
+        except ValidationError as exc:
+            return self.send_json({"error": explain(exc)}, 400)
+        except contacts.Problem as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except (json.JSONDecodeError, KeyError) as exc:
+            return self.send_json({"error": f"the request was not understood: {exc}"}, 400)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             # The browser stopped listening mid-reply. That is what talking over the assistant looks
             # like from here, so it is ordinary: there is nobody left to send an error to.
@@ -206,6 +250,205 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             traceback.print_exc()
             return self.send_json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+
+    def flow_action(self, rest: str):
+        """/api/flows/<id> saves the draft; /<id>/publish, /<id>/discard and /<id>/delete do what they say."""
+        flow_id, _, action = rest.partition("/")
+        try:
+            flow = storage.get_flow(flow_id)
+        except KeyError:
+            return self.send_json({"error": "that flow does not exist"}, 404)
+        data = self.body()
+
+        if action == "delete":
+            storage.delete_flow(flow_id)
+            return self.send_json({"deleted": flow_id})
+
+        if action == "duplicate":
+            copy = storage.new_flow(f"{flow.name} (copy)", flow.setup.model_copy(deep=True))
+            copy.groups, copy.channels = list(flow.groups), list(flow.channels)
+            return self.send_json(storage.save_flow(copy, touch=False).model_dump())
+
+        if action == "restore":
+            # An earlier published version becomes the draft. Nothing goes live until it is published again.
+            version = next((one for one in flow.history if one.at == data.get("at")), None)
+            if version is None:
+                return self.send_json({"error": "That version is no longer kept."}, 404)
+            flow.setup = version.setup.model_copy(deep=True)
+            return self.send_json(storage.save_flow(flow).model_dump())
+
+        if action == "unpublish":
+            # Back to a draft: nothing is live or scheduled. The choices made when publishing are kept.
+            flow.status, flow.published, flow.scheduled_for = "Draft", None, ""
+            return self.send_json(storage.save_flow(flow).model_dump())
+
+        if action == "discard":
+            # Back to what is live: the draft's edits since the last publish are dropped.
+            if flow.published is None:
+                return self.send_json({"error": "It has never been published, so there is nothing to go back to."}, 400)
+            flow.setup = flow.published.model_copy(deep=True)
+            return self.send_json(storage.save_flow(flow).model_dump())
+
+        if action == "publish":
+            channels = [c for c in data.get("channels") or [] if c in ("Website", "WhatsApp", "Call")]
+            when = "Schedule" if data.get("when") == "Schedule" else "Now"
+            if not channels:
+                return self.send_json({"error": "Pick at least one place for it to go."}, 400)
+            at = (data.get("scheduled_for") or "").strip()
+            if when == "Schedule":
+                if not at:
+                    return self.send_json({"error": "Pick a date and time to schedule it for."}, 400)
+                try:
+                    moment = datetime.fromisoformat(at)
+                except ValueError:
+                    return self.send_json({"error": "That date and time could not be read."}, 400)
+                # A minute's grace, for a time picked just before pressing Publish.
+                if moment.tzinfo is None and moment < datetime.now() - timedelta(minutes=1):
+                    return self.send_json({"error": "That time has already passed. Pick one in the future."}, 400)
+            problems = check_setup(flow.setup)
+            if problems:
+                return self.send_json({"error": " ".join(problems)}, 400)
+            known = {group["id"] for group in contacts.list_groups()["groups"]}
+            groups = [group for group in dict.fromkeys(data.get("groups") or []) if group in known]
+            # The website widget is opened by whoever visits; calls and WhatsApp go to people, who must be named.
+            if not groups and any(channel in ("WhatsApp", "Call") for channel in channels):
+                return self.send_json({"error": "Pick the groups of contacts it goes to."}, 400)
+            flow.channels, flow.when, flow.groups = channels, when, groups
+            flow.audience = (data.get("audience") or "").strip()
+            flow.scheduled_for = at if when == "Schedule" else ""
+            flow.status = "Scheduled" if when == "Schedule" else "Live"
+            flow.published = flow.setup.model_copy(deep=True)
+            flow.published_at = datetime.now().isoformat(timespec="seconds")
+            # Publishing the same thing again is not a new version.
+            if not flow.history or flow.history[0].setup != flow.published:
+                flow.history.insert(0, Version(at=flow.published_at, name=flow.name, setup=flow.published))
+                del flow.history[KEPT_VERSIONS:]
+            return self.send_json(storage.save_flow(flow).model_dump())
+
+        if action:
+            return self.send_json({"error": "unknown route"}, 404)
+        # Made from an older version than the one stored: another tab saved in between. Saving anyway would
+        # throw that tab's work away without anyone knowing, so say so and send what is stored now.
+        if data.get("version") is not None and int(data["version"]) != flow.version:
+            return self.send_json({"error": "This flow was changed somewhere else.", "conflict": True,
+                                   "flow": flow.model_dump()}, 409)
+        flow.name = (data.get("name") or flow.name).strip() or flow.name
+        if data.get("setup"):
+            flow.setup = BusinessSetup(**data["setup"])
+        return self.send_json(storage.save_flow(flow).model_dump())
+
+    def flow_read(self, flow_id: str, what: str):
+        """GET /api/flows/<id>/results, and /<id>/export.csv: one flow's answers, summed up or one row a call."""
+        try:
+            flow = storage.get_flow(flow_id)
+        except KeyError:
+            return self.send_json({"error": "that flow does not exist"}, 404)
+        if what == "results":
+            groups = flow.groups
+            return self.send_json(results.flow_results(
+                flow, contacts.audience(groups, results.called_contacts(flow_id)) if groups else {}))
+        if what == "export.csv":
+            body = ("\ufeff" + results.flow_csv(flow)).encode("utf-8")      # the mark makes Excel read it as UTF-8
+            name = "".join(ch if ch.isalnum() else "-" for ch in flow.name).strip("-").lower() or "flow"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="{name}-results.csv"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        return self.send_json({"error": "unknown route"}, 404)
+
+    # ── contacts ─────────────────────────────────────────────────────────────
+    def contacts_read(self, rest: str, query: dict):
+        """GET /api/contacts (a page of them), /groups, /sources, and /<id> (one, with its calls)."""
+        if rest == "":
+            return self.send_json(contacts.list_contacts(
+                group=query.get("group", ""), search=query.get("search", ""), status=query.get("status", ""),
+                offset=max(int(query.get("offset") or 0), 0), limit=min(max(int(query.get("limit") or 50), 1), 200)))
+        if rest == "groups":
+            return self.send_json(contacts.list_groups())
+        if rest == "sources":
+            return self.send_json({"drivers": sources.drivers(), "connections": sources.list_connections(),
+                                   "country": contacts.DEFAULT_COUNTRY})
+        if "/" not in rest:
+            try:
+                found = contacts.get_contact(rest)
+            except KeyError:
+                return self.send_json({"error": "That contact no longer exists."}, 404)
+            return self.send_json({**found, "calls": storage.recent_calls(limit=20, contact=rest)["calls"]})
+        return self.send_json({"error": "unknown route"}, 404)
+
+    def contacts_action(self, rest: str):
+        """POST under /api/contacts: adding and changing contacts and groups, imports, and databases."""
+        if rest == "file":
+            return self.send_json(sources.read_file(unquote(self.headers.get("X-Filename", "")), self.raw_body()))
+        data = self.body()
+        parts = rest.split("/")
+        country = data.get("country") or contacts.DEFAULT_COUNTRY
+        try:
+            if rest == "":
+                return self.send_json(contacts.save_contact(data, country=country))
+            if rest == "delete":
+                return self.send_json({"deleted": contacts.delete_contacts(list(data.get("ids") or []))})
+            if rest == "opt-out":
+                return self.send_json({"changed": contacts.set_opted_out(list(data.get("ids") or []),
+                                                                          bool(data.get("opted_out")))})
+            if rest == "reach":
+                return self.send_json(contacts.reach(list(data.get("groups") or [])))
+            if rest == "import":
+                return self.send_json(contacts.bring_in(
+                    list(data.get("columns") or []), list(data.get("rows") or []), dict(data.get("mapping") or {}),
+                    country=country, group_id=data.get("group_id") or "", new_group=data.get("new_group") or "",
+                    dry_run=bool(data.get("dry_run"))))
+            if rest == "groups":
+                return self.send_json(contacts.create_group(data.get("name") or "", data.get("description") or ""))
+            if parts[0] == "groups" and len(parts) == 2:
+                return self.send_json(contacts.update_group(parts[1], data.get("name"), data.get("description")))
+            if parts[0] == "groups" and len(parts) == 3:
+                return self.group_action(parts[1], parts[2], data)
+            if rest == "connections":
+                return self.send_json(sources.save_connection(data.get("name") or "", data.get("kind") or "",
+                                                              data.get("address") or ""))
+            if parts[0] == "connections" and len(parts) == 3 and parts[2] == "delete":
+                sources.delete_connection(parts[1])
+                return self.send_json({"deleted": parts[1]})
+            if parts[0] == "connections" and len(parts) == 3 and parts[2] == "tables":
+                return self.send_json({"tables": sources.list_tables(sources._find(parts[1]))})
+            if rest == "query":
+                return self.send_json(sources.read_rows(data.get("connection") or "", data.get("table") or "",
+                                                        data.get("query") or ""))
+            if rest == "database-group":
+                return self.database_group(data, country)
+            if len(parts) == 1:
+                return self.send_json(contacts.save_contact(data, contact_id=parts[0], country=country))
+        except KeyError:
+            return self.send_json({"error": "That contact or group no longer exists."}, 404)
+        return self.send_json({"error": "unknown route"}, 404)
+
+    def group_action(self, group_id: str, action: str, data: dict):
+        if action == "delete":
+            using = [flow.name for flow in storage.list_flows() if flow.status != "Draft" and group_id in flow.groups]
+            if using and not data.get("force"):
+                verb = "is" if len(using) == 1 else "are"
+                return self.send_json({"error": f"{', '.join(using)} {verb} sent to this group.", "flows": using}, 409)
+            return self.send_json({"removed": contacts.delete_group(group_id, bool(data.get("with_contacts")))})
+        if action == "sync":
+            return self.send_json(sources.sync_group(group_id))
+        if action == "members":
+            return self.send_json({"changed": contacts.change_members(group_id, list(data.get("ids") or []),
+                                                                       bool(data.get("add", True)))})
+        return self.send_json({"error": "unknown route"}, 404)
+
+    def database_group(self, data: dict, country: str):
+        """A new group read from a database. Everything is read first, so a query that fails leaves no empty group."""
+        config = {"connection": data.get("connection") or "", "table": data.get("table") or "",
+                  "query": data.get("query") or "", "mapping": dict(data.get("mapping") or {}), "country": country}
+        found = sources.read_rows(config["connection"], config["table"], config["query"], limit=contacts.MAX_IMPORT)
+        if found["more"]:
+            raise contacts.Problem(f"The query gives more than {contacts.MAX_IMPORT:,} rows. Narrow it with a WHERE.")
+        return self.send_json(contacts.bring_in(found["columns"], found["rows"], config["mapping"], country=country,
+                                                new_group=data.get("name") or "", source="database", config=config))
 
     def hear_voice(self):
         """A sample line in the voice as set up, so the voice and speed can be tried before a call."""
@@ -227,12 +470,16 @@ class Handler(BaseHTTPRequestHandler):
     # ── a call ───────────────────────────────────────────────────────────────
     def start_call(self):
         data = self.body()
-        setup = BusinessSetup(**data["setup"]) if data.get("setup") else storage.load_setup()
+        if not data.get("setup"):
+            return self.send_json({"error": "no setup was sent with the call"}, 400)
+        setup = BusinessSetup(**data["setup"])
         problems = check_setup(setup)
         if problems:
             return self.send_json({"error": " ".join(problems)}, 400)
 
         call, greeting = engine.start(setup, data.get("customer") or {})
+        flow_id = str(data.get("flow_id") or "")
+        call.flow_id = flow_id if flow_id.isalnum() and len(flow_id) <= 32 else ""
         with lock:
             calls[call.id] = call
         self.stream_reply(call, heard="", say=greeting, ended=False, think_ms=0,
@@ -301,6 +548,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_stream()
 
 
+class OnePortServer(ThreadingHTTPServer):
+    # The standard server lets the address be reused. On Windows that lets a second copy start on a port the
+    # first still holds, and requests keep reaching the first, running whatever code it started with.
+    allow_reuse_address = sys.platform != "win32"
+
+
 def serve(port: int = 8000, open_browser: bool = True):
     settings.DATA_FOLDER.mkdir(parents=True, exist_ok=True)
     # Build the Gemini client now rather than inside the first request, so the greeting isn't the thing
@@ -311,7 +564,11 @@ def serve(port: int = 8000, open_browser: bool = True):
         gemini.client()
     except Exception as exc:
         print(f"  note: {exc}")
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    try:
+        server = OnePortServer(("127.0.0.1", port), Handler)
+    except OSError:
+        raise SystemExit(f"Port {port} is already in use, most likely by Voice Call started earlier. Stop that one "
+                         f"first, or run this one on another port: python -m voice_call --port {port + 1}")
     address = f"http://127.0.0.1:{port}"
     print(f"Voice Call is running at {address}")
     print("  /        set up your business")

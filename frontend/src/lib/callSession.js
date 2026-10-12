@@ -38,6 +38,7 @@ export class CallSession {
     this.toast = () => {};
 
     this.setup = null;
+    this.flowId = "";                 // the flow being tested, so the saved call says which one it was
     this.callId = null;
     this.speakOutLoud = true;
     this.player = null;
@@ -69,8 +70,9 @@ export class CallSession {
     this.listeners.forEach((listener) => listener());
   }
 
-  setSetup(setup) {
+  setSetup(setup, flowId = "") {
     this.setup = setup;
+    this.flowId = flowId;
   }
 
   interruptible() {
@@ -141,6 +143,7 @@ export class CallSession {
     return mic;
   }
 
+  /** `customer`: a contact ({id, name, phone}), or just a name typed in. */
   async begin({ customer = "", speak = true } = {}) {
     this.problem("");
     this.speakOutLoud = speak;
@@ -161,9 +164,10 @@ export class CallSession {
       timings: { heard: null, think: null, speak: null, total: 0 },
     });
 
-    const name = customer.trim();
+    const known = typeof customer === "object" && customer ? customer : { name: String(customer || "").trim() };
+    const who = Object.fromEntries(Object.entries(known).filter(([, value]) => value));
     const head = await this.run((signal) =>
-      api.startCall(name ? { name } : {}, this.speakOutLoud, this.hooks(), signal));
+      api.startCall(this.setup, who, this.speakOutLoud, this.hooks(), signal, this.flowId));
     if (!head) { this.set({ phase: "ready" }); return; }
     this.callId = head.state.id;
     this.startClock();
@@ -332,8 +336,9 @@ export class CallSession {
 
   async refreshSummary() {
     try {
-      const calls = await api.recentCalls();
-      this.set({ summary: calls?.[0]?.summary || "" });
+      // This call's own entry: with other calls finishing too, the newest one need not be it.
+      const { calls } = await api.recentCalls({ flow: this.flowId, limit: 5 });
+      this.set({ summary: calls.find((one) => one.call === this.callId)?.summary || "" });
     } catch {
       this.set({ summary: "" });
     }

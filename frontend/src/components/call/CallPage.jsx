@@ -10,10 +10,10 @@ import { Presence } from "./LevelMeter.jsx";
 import { StartPanel } from "./StartPanel.jsx";
 
 /** A test call: the start panel before it, the live conversation during it, the outcome after. */
-export function CallPage({ session, setup }) {
+export function CallPage({ session, setup, flowName }) {
   const state = useSyncExternalStore(session.subscribe, session.getSnapshot);
 
-  if (state.phase === "ready") return <StartPanel session={session} state={state} setup={setup} />;
+  if (state.phase === "ready") return <StartPanel session={session} state={state} setup={setup} flowName={flowName} />;
 
   // Two things only: the call itself, and what it has saved. The rest is folded away until it's wanted.
   return (
@@ -142,7 +142,8 @@ const MARKS = {
 
 function Answers({ state, setup }) {
   const call = state.call;
-  const questions = setup?.questions || [];
+  // Messages and ends have no answer to wait for: only the questions are listed.
+  const questions = (setup?.questions || []).filter((one) => (one.kind || "ask") === "ask");
   const done = call ? Object.keys(call.answers || {}).length : 0;
   const share = questions.length ? Math.round((done / questions.length) * 100) : 0;
 

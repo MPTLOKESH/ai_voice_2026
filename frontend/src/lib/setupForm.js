@@ -28,6 +28,12 @@ export const OPTIONS = {
                          ["700", "Patient · 0.7 s"], ["1000", "Very patient · 1 s"]],
 };
 
+/** A place on the canvas, to a whole pixel, or null. */
+const spot = (value) => (Number.isFinite(Number(value)) && value !== null && value !== "" ? Math.round(Number(value)) : null);
+/** [x, y], or [] when the greeting or the close is where the default layout puts it. */
+const pair = (value) => (Array.isArray(value) && value.length === 2 && value.every((one) => Number.isFinite(Number(one)))
+  ? value.map((one) => Math.round(Number(one))) : []);
+
 export function number(name, value) {
   const [low, high, step] = LIMITS[name];
   const given = Number(value) || NUMBERS[name];
@@ -39,11 +45,17 @@ export const commas = (text) => text.split(",").map((s) => s.trim()).filter(Bool
 
 let keys = 0;
 /** Each question on screen gets a key of its own, so React keeps its boxes in place when one is removed. */
-const withKey = (question) => ({ ...question, _key: question._key ?? `q${++keys}` });
+const withKey = (question) => ({ ...question, _key: question._key ?? `q${++keys}`, _auto: question._auto ?? false });
 
+// `_auto`: the saved name still follows the wording, until someone types a name of their own.
+// `kind`: "ask" (a question), "say" (a message, no answer) or "end" (ends the call once its condition is met).
 export const blankQuestion = () => withKey({
+  _auto: true, kind: "ask", handoff: false,
   save_as: "", ask: "", type: "text", rule: "", options: [], required: true, only_if: "", only_if_is: [],
 });
+
+/** The steps that are questions: what gets answered. */
+export const asks = (questions) => questions.filter((question) => (question.kind || "ask") === "ask");
 
 /** A setup as the form shows it. */
 export function toForm(setup) {
@@ -59,6 +71,7 @@ export function toForm(setup) {
     ...Object.fromEntries(LINES.map((name) => [name, (setup[name] || []).join("\n")])),
     ...Object.fromEntries(COMMAS.map((name) => [name, (setup[name] || []).join(", ")])),
     questions: (setup.questions || []).map(withKey),
+    open_at: pair(setup.open_at), close_at: pair(setup.close_at),
   };
 }
 
@@ -71,7 +84,9 @@ export function normalise(setup) {
     ...Object.fromEntries(Object.keys(NUMBERS).map((name) => [name, number(name, setup[name])])),
     ...Object.fromEntries(Object.entries(SWITCHES).map(([name, fallback]) => [name, setup[name] ?? fallback])),
     ...Object.fromEntries([...LINES, ...COMMAS].map((name) => [name, setup[name] || []])),
+    open_at: pair(setup.open_at), close_at: pair(setup.close_at),
     questions: (setup.questions || []).map((question) => ({
+      kind: question.kind || "ask", handoff: Boolean(question.handoff), x: spot(question.x), y: spot(question.y),
       save_as: question.save_as, ask: question.ask, type: question.type, rule: question.rule || "",
       options: question.options || [], required: question.required !== false,
       only_if: question.only_if || "", only_if_is: question.only_if ? question.only_if_is || [] : [],
@@ -95,24 +110,28 @@ export const EMPTY = {
   ...Object.fromEntries(Object.keys(NUMBERS).map((name) => [name, ""])),
   ...Object.fromEntries([...LINES, ...COMMAS].map((name) => [name, []])),
   questions: [],
+  open_at: [], close_at: [],
 };
 
 /** Problems a business can fix, checked here so a call never starts on a broken setup. */
 export function problems(setup) {
   const found = [];
   if (!setup.purpose.trim()) found.push("Say why it is calling.");
-  if (!setup.questions.length) found.push("Add at least one question.");
+  if (!asks(setup.questions).length) found.push("Add at least one question.");
   const names = setup.questions.map((question) => question.save_as);
   setup.questions.forEach((question, at) => {
     const name = question.save_as || "unnamed";
-    if (!question.ask.trim()) found.push("Every question needs wording.");
+    const kind = question.kind || "ask";
+    if (!question.ask.trim() && kind !== "end") found.push(kind === "say" ? "Every message needs wording." : "Every question needs wording.");
     if (!/^[a-z_][a-z0-9_]*$/i.test(question.save_as)) {
       found.push(`"${name}": the saved name needs letters, numbers and underscores.`);
     }
-    if (question.type === "choice" && (question.options || []).length < 2) {
+    if (kind === "ask" && question.type === "choice" && (question.options || []).length < 2) {
       found.push(`"${name}": a choice needs at least two options.`);
     }
-    if (question.only_if && !names.slice(0, at).includes(question.only_if)) {
+    if (kind === "end" && !question.only_if) found.push(`"${name}": an end step needs a condition, or it would end every call.`);
+    const above = setup.questions.slice(0, at).filter((other) => (other.kind || "ask") === "ask").map((other) => other.save_as);
+    if (question.only_if && !above.includes(question.only_if)) {
       found.push(`"${name}" can only depend on a question above it.`);
     } else if (question.only_if && !question.only_if_is.length) {
       found.push(`"${name}": say which answer it is asked after.`);

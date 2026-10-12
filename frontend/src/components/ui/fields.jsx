@@ -3,8 +3,8 @@ import { cloneElement, isValidElement, useId } from "react";
 import { cn } from "../../lib/cn.js";
 
 const CONTROL = cn(
-  "w-full rounded-lg border border-edge bg-white px-3 text-[14px] text-ink shadow-[0_1px_1px_rgb(0_0_0/0.03)]",
-  "placeholder:text-muted/70 transition-colors hover:border-[#a1a1aa]",
+  "w-full rounded-xl border border-edge bg-white px-3.5 text-[14px] text-ink",
+  "placeholder:text-faint transition-colors hover:border-[#c9c9d1]",
   "focus:border-brand focus:outline-none focus:ring-3 focus:ring-brand/15",
 );
 
@@ -67,14 +67,13 @@ export function Choices({ label, options, value, onChange, hint, className }) {
     <div className={cn("flex min-w-0 flex-col gap-1.5", className)}>
       <label id={id} htmlFor={`${id}-select`} className="text-[13px] font-medium text-ink">{label}</label>
       <div role="radiogroup" aria-labelledby={id}
-           className="hidden self-start rounded-lg bg-black/[0.05] p-0.5 sm:inline-flex">
+           className="hidden self-start rounded-full bg-fill p-0.5 sm:inline-flex">
         {options.map(([option, text]) => {
           const picked = option === value;
           return (
             <button key={option} type="button" role="radio" aria-checked={picked} onClick={() => onChange(option)}
-                    className={cn("h-8 rounded-md px-3 text-[13px] font-medium whitespace-nowrap transition-colors",
-                                  "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-brand/50",
-                                  picked ? "bg-white text-brand-ink shadow-[0_1px_2px_rgb(0_0_0/0.1),0_0_0_0.5px_rgb(0_0_0/0.06)]"
+                    className={cn("h-8 rounded-full px-3.5 text-[13px] font-semibold whitespace-nowrap transition-colors",
+                                  picked ? "bg-white text-ink shadow-[0_1px_2px_rgb(17_17_20/0.1)]"
                                     : "text-muted hover:text-ink")}>
               {text}
             </button>
@@ -101,12 +100,33 @@ export function Toggle({ checked, onChange, label, description, className }) {
       <span className="relative inline-flex shrink-0">
         <input id={id} type="checkbox" role="switch" checked={checked}
                onChange={(event) => onChange(event.target.checked)} className="peer sr-only" />
-        <span className={cn("h-5 w-9 rounded-full bg-[#d4d4d8] transition-colors duration-150 peer-checked:bg-brand",
+        <span className={cn("h-5 w-9 rounded-full bg-[#d4d4da] transition-colors duration-150 peer-checked:bg-brand",
                             "peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2",
                             "peer-focus-visible:outline-brand/50")} />
         <span className="absolute top-0.5 left-0.5 size-4 rounded-full bg-white shadow-[0_1px_2px_rgb(0_0_0/0.25)]
                          transition-transform duration-150 peer-checked:translate-x-4" />
       </span>
     </label>
+  );
+}
+
+/**
+ * A row of pills to pick one from, as under the cards in the Studio: the picked one is ink, the rest white.
+ * `options` are [value, label] pairs.
+ */
+export function Pills({ options, value, onChange, label, className }) {
+  return (
+    <div role="radiogroup" aria-label={label} className={cn("flex flex-wrap items-center gap-2", className)}>
+      {options.map(([option, text]) => {
+        const picked = option === value;
+        return (
+          <button key={option} type="button" role="radio" aria-checked={picked} onClick={() => onChange(option)}
+                  className={cn("h-8 rounded-full border px-3.5 text-[13px] font-semibold whitespace-nowrap transition-colors",
+                                picked ? "border-ink bg-ink text-white" : "border-edge bg-white text-ink hover:bg-hover")}>
+            {text}
+          </button>
+        );
+      })}
+    </div>
   );
 }

@@ -53,7 +53,8 @@ SPEAKER_RATE = 24_000           # what ElevenLabs speaks at, and what the browse
 
 PROJECT = Path(__file__).resolve().parent.parent
 DATA_FOLDER = PROJECT / "data"
-CONFIG_FILE = PROJECT / "config" / "business.json"
+CONFIG_FILE = PROJECT / "config" / "business.json"      # the one setup of earlier versions: becomes the first flow
+FLOWS_FOLDER = PROJECT / "config" / "flows"
 WEB_FOLDER = PROJECT / "web"
 
 
