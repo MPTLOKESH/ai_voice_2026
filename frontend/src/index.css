@@ -48,8 +48,10 @@
   --color-brand-soft: #f0ecff;
   --color-brand-wash: #f7f4ff;
 
-  --color-human: #3b5bdb;
-  --color-human-soft: #eef2ff;
+  --color-human: #0d9488;
+  --color-human-soft: #e2f6f3;
+  --color-why: #b7791f;                 /* "Say why it is calling": gold, apart from every other kind of step */
+  --color-why-soft: #fff4d6;
   --color-loop: #e2551f;
   --color-loop-ink: #b84319;
   --color-loop-soft: #fff1ea;
@@ -92,8 +94,14 @@
 
 /* The dotted workspace behind the thread. */
 @utility bg-dotted {
-  background-image: radial-gradient(#d9d9e0 1.2px, transparent 1.2px);
-  background-size: 22px 22px;
+  background-color: #f9f8fd;
+  background-image: radial-gradient(#d3d0e2 1.2px, transparent 1.2px);
+  background-size: 32px 32px;
+}
+.canvas-wash {
+  background:
+    radial-gradient(60% 55% at 0% 0%, rgb(110 76 245 / 0.07), transparent 70%),
+    radial-gradient(55% 50% at 100% 100%, rgb(255 138 76 / 0.06), transparent 70%);
 }
 
 @keyframes pulse-ring {
@@ -104,6 +112,22 @@
   animation: pulse-ring 1.4s ease-out infinite;
 }
 
+/* What the AI tools wear: a ring of colour that travels round them, with a soft glow that breathes. */
+@property --ai-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
+@keyframes ai-spin { to { --ai-angle: 360deg; } }
+@keyframes ai-breathe {
+  0%, 100% { box-shadow: 0 0 14px 2px rgb(110 76 245 / 0.35), 0 8px 24px rgb(17 17 20 / 0.08); }
+  50% { box-shadow: 0 0 30px 8px rgb(110 76 245 / 0.6), 0 8px 24px rgb(17 17 20 / 0.08); }
+}
+.ai-glow {
+  border: 2px solid transparent;
+  background: linear-gradient(#fff, #fff) padding-box,
+              conic-gradient(from var(--ai-angle), #6e4cf5, #c084fc, #38bdf8, #6e4cf5) border-box;
+  box-shadow: 0 0 20px 4px rgb(110 76 245 / 0.45), 0 8px 24px rgb(17 17 20 / 0.08);
+  animation: ai-spin 4s linear infinite, ai-breathe 2.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) { .ai-glow { animation: none; } }
+
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(6px); }
 }
@@ -112,6 +136,37 @@
   from { opacity: 0; transform: translateX(16px); }
 }
 
+@keyframes context-in {
+  0% { opacity: 0; transform: translateX(-340px) scale(0.55); filter: blur(6px); }
+  45% { opacity: 1; filter: blur(0); }
+  75% { transform: translateX(10px) scale(1.07); }
+  100% { opacity: 1; transform: translateX(0) scale(1); filter: blur(0); }
+}
+
+/* A line drawing on from its start, quickly; the plus on it pops in just after. */
+@keyframes line-draw {
+  0% { stroke-dashoffset: 1; opacity: 0; }
+  12% { opacity: 1; }
+  100% { stroke-dashoffset: 0; opacity: 1; }
+}
+@keyframes stub-draw {
+  from { transform: scaleX(0); opacity: 0; }
+}
+@keyframes plus-in {
+  from { opacity: 0; transform: scale(0.3); }
+}
+
 @keyframes node-in {
-  from { opacity: 0; transform: scale(0.88); }
+  from { opacity: 0; transform: scale(0.88); translate: -16px 0; }
+}
+
+/* A dashed line (an "only if" arch, a go-back curve) is shown from its start to its end, then its dashes keep running along it. */
+@keyframes reveal-x {
+  from { clip-path: inset(-40px 100% -40px -40px); }
+  to { clip-path: inset(-40px -40px -40px -40px); }
+}
+@keyframes dash-run-if { to { stroke-dashoffset: -11; } }
+@keyframes dash-run-loop { to { stroke-dashoffset: -8; } }
+@keyframes tag-in {
+  from { opacity: 0; scale: 0.7; }
 }

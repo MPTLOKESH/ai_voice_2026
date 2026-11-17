@@ -12,19 +12,21 @@ from __future__ import annotations
 import csv
 import importlib.util
 import io
+import ipaddress
 import json
+import os
 import re
+import socket
 import uuid
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from . import settings
+from . import accounts, scope, settings, vault
 from . import contacts
 from .contacts import MAX_IMPORT, Problem
 from .storage import write_atomic
 
-CONNECTIONS_FILE = settings.PROJECT / "config" / "connections.json"
 PREVIEW_ROWS = 20
 MAX_FILE_BYTES = 15 * 1024 * 1024
 
@@ -110,13 +112,33 @@ def _read_excel(data: bytes) -> list[list]:
 
 # ── saved connections ────────────────────────────────────────────────────────
 
+def _context(connection_id: str) -> str:
+    return f"connection:{scope.owner()}:{connection_id}"
+
+
 def _load() -> list[dict]:
-    if not CONNECTIONS_FILE.exists():
+    """The person's saved connections, addresses decrypted. An address saved before encryption existed is read as it is
+    and sealed the next time the list is written."""
+    path = scope.connections_file()
+    if not path.exists():
         return []
     try:
-        return json.loads(CONNECTIONS_FILE.read_text(encoding="utf-8"))
+        found = json.loads(path.read_text(encoding="utf-8"))
     except ValueError:
         return []
+    for one in found:
+        if vault.is_sealed(one.get("address", "")):
+            try:
+                one["address"] = vault.unseal(one["address"], _context(one["id"]))
+            except vault.Unreadable:
+                one["address"] = ""
+    return found
+
+
+def _save(found: list[dict]):
+    """Addresses carry passwords, so they are written encrypted."""
+    write_atomic(scope.connections_file(), json.dumps(
+        [{**one, "address": vault.seal(one["address"], _context(one["id"]))} for one in found], indent=2))
 
 
 def _mask(address: str) -> str:
@@ -148,21 +170,60 @@ def save_connection(name: str, kind: str, address: str) -> dict:
     tables = list_tables({"kind": kind, "address": address})
     one = {"id": uuid.uuid4().hex[:8], "name": name.strip()[:80] or KINDS[kind]["label"], "kind": kind,
            "address": address, "created": datetime.now().isoformat(timespec="seconds")}
-    write_atomic(CONNECTIONS_FILE, json.dumps([*_load(), one], indent=2))
+    _save([*_load(), one])
     return {**_public(one), "tables": tables}
 
 
 def delete_connection(connection_id: str):
-    write_atomic(CONNECTIONS_FILE, json.dumps([one for one in _load() if one["id"] != connection_id], indent=2))
+    _save([one for one in _load() if one["id"] != connection_id])
 
 
 # ── reading a database ───────────────────────────────────────────────────────
+
+def _server_owner() -> bool:
+    """The person running this server may point at its own machine and network. Nobody else may."""
+    who = accounts.get(scope.owner())
+    return bool(who and who["is_admin"])
+
+
+def _host_of(address: str) -> str:
+    if "://" in address:
+        return urlparse(address).hostname or ""
+    found = re.search(r"(?:^|\s)host=([^\s]+)", address)
+    return found.group(1) if found else ""
+
+
+def _check_where(kind: str, address: str):
+    """A database a person names is reached FROM this server, so on a shared server it must not be this server's own files
+    or a machine on its private network."""
+    if kind == "sqlite":
+        path = Path(address.removeprefix("sqlite:///").removeprefix("sqlite://")).resolve()
+        if not _server_owner():
+            raise Problem("SQLite files can only be read by the person running this server. Use PostgreSQL or MySQL.")
+        data = settings.DATA_FOLDER.resolve()
+        if path == data or data in path.parents:
+            raise Problem("That file is part of this app's own data and can't be read as a database.")
+        return
+    host = _host_of(address)
+    if _server_owner() or (os.getenv("ALLOW_PRIVATE_DB") or "") == "1":
+        return
+    if not host:
+        raise Problem("Say which host the database is on.")
+    try:
+        found = {item[4][0] for item in socket.getaddrinfo(host, None)}
+    except OSError:
+        raise Problem(f"Could not find a server called {host}.") from None
+    if not found or any(not ipaddress.ip_address(one.split("%")[0]).is_global for one in found):
+        raise Problem("That address is on a private network, which this server will not connect to. "
+                      "Use a database that can be reached over the internet.")
+
 
 def _open(connection: dict):
     """A read-only connection, and the way it marks a query's parameters."""
     kind, address = connection["kind"], connection["address"].strip()
     if not address:
         raise Problem("Fill in where the database is.")
+    _check_where(kind, address)
     info = KINDS[kind]
     if importlib.util.find_spec(info["module"]) is None:
         raise Problem(f"Connecting to {info['label']} needs one more part: run `{info['install']}` and restart the app.")

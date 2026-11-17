@@ -10,23 +10,29 @@ Built on the standard library, so nothing extra needs installing. Run it with:  
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import time
 import traceback
 import webbrowser
 from datetime import datetime, timedelta
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 from pydantic import ValidationError
 
-from . import contacts, engine, gemini, results, settings, sources, storage, voices
+from . import accounts, contacts, credentials, engine, gemini, mailer, results, scope, settings, sources, storage, usage, voices
 from .models import KEPT_VERSIONS, BusinessSetup, Call, Version
+from .assist import assist, rewrite_context, suggest_next
 from .suggestions import reword, suggest_questions
 
 calls: dict[str, Call] = {}
 lock = threading.Lock()
+# Saving a flow reads it, changes it and writes it back. Two of those at once (an autosave and a publish) would
+# each start from the same stored copy, and the second write would silently drop the first one's change.
+flow_lock = threading.RLock()
 
 # One turn of a call at a time. Nothing stopped a second turn being sent while the first was still
 # thinking — talking over the reply does exactly that — and two threads then ran `reply_to` on the same
@@ -48,51 +54,79 @@ def check_setup(setup: BusinessSetup) -> list[str]:
     if not any(q.kind == "ask" for q in setup.questions):
         problems.append("Add at least one question.")
     if not setup.purpose.strip():
-        problems.append("Say what the call is for.")
+        problems.append("Say why the call is being made, in the opening step.")
     names = [q.save_as for q in setup.questions]
     for name in sorted({n for n in names if names.count(n) > 1}):
-        problems.append(f"Two questions are saved as '{name}'.")
+        problems.append(f"Two steps share the column name '{name}'. Give one of them another in its More options.")
     for q in setup.questions:
         if not q.save_as.isidentifier():
-            problems.append(f"'{q.save_as}': use letters, numbers and underscores only.")
+            problems.append(f"The column name '{q.save_as}' can only use letters, numbers and underscores.")
         if q.kind == "ask" and q.type == "choice" and len(q.options) < 2:
-            problems.append(f"'{q.save_as}': a choice needs at least two options.")
+            problems.append(f"A choice question needs at least two options ('{q.ask or q.save_as}').")
         if q.kind == "say" and not q.ask.strip():
-            problems.append(f"'{q.save_as}': write what it should say.")
-        if q.kind == "end" and not q.only_if:
-            problems.append(f"'{q.save_as}': an end step needs a condition, or it would end every call.")
+            problems.append("A message step is empty: write what it should say.")
+        if q.kind == "loop" and not q.only_if:
+            problems.append("A go-back step needs a condition, or it would go back on every call.")
     for at, q in enumerate(setup.questions):
-        if not q.only_if:
-            continue
         # Only an earlier question, so no two questions can each wait for the other.
         above = [other.save_as for other in setup.questions[:at] if other.kind == "ask"]
+        if q.kind == "loop" and q.back_to not in above:
+            problems.append("A go-back step needs a question above it to go back to.")
+        if not q.only_if:
+            continue
         if q.only_if not in above:
-            problems.append(f"'{q.save_as}' can only depend on a question above it.")
+            problems.append(f"'{q.ask or q.save_as}' can only wait on a question above it.")
         elif not q.only_if_is:
-            problems.append(f"'{q.save_as}': say which answer to '{q.only_if}' it is asked after.")
+            problems.append(f"Say which answer to the earlier question makes '{q.ask or q.save_as}' get asked.")
     return problems
 
 
+SETTING_NAMES = {"speaking_speed": "Speed", "tries_per_question": "Ask again up to", "silences_before_ending": "Hang up after",
+                 "wait_after_speech_ms": "Wait before replying", "max_minutes": "Call length", "tone": "Tone",
+                 "reply_length": "How much it says", "formality": "Formality", "language": "Language"}
+
+
 def explain(failure: ValidationError) -> str:
-    """The first thing wrong with a setup, in a line: "speaking_speed: Input should be less than or equal to 1.2"."""
+    """The first thing wrong with a setup, in plain words: "Speed can't be more than 1.2"."""
     first = failure.errors()[0]
+    name = next((SETTING_NAMES[str(part)] for part in reversed(first["loc"]) if str(part) in SETTING_NAMES), "")
+    context = first.get("ctx") or {}
+    if name and "le" in context:
+        return f"{name} can't be more than {context['le']}."
+    if name and "ge" in context:
+        return f"{name} can't be less than {context['ge']}."
+    if name:
+        return f"{name}: that value can't be used."
     where = ".".join(str(part) for part in first["loc"])
     return f"{where}: {first['msg']}" if where else first["msg"]
 
 
+FALLBACK_LINE = "Sorry, I missed that. Could you say it again?"
+ABANDONED_AFTER = 180      # seconds without a turn before a call is treated as hung up
 REMEMBER_CALLS = 20        # finished calls kept in memory, so the page can still read them
 
 
 def finish(call: Call):
-    """Summarise, save again with the summary, and let old calls go."""
+    """Summarise, save again with the summary, and let old calls go. Done as the call's owner."""
+    with scope.acting_as(call.owner), usage.tagged("summary", call.flow_id):
+        _finish(call)
+
+
+def _finish(call: Call):
     try:
-        call.summary = engine.summarise(call).model_dump()
+        call.summary = engine.summarise(call).model_dump() if len(call.transcript) > 1 else None
     except Exception as exc:                      # a summary is not worth losing the call over
         call.note(f"summary failed: {exc}")
     # Nothing is listening for these any more — the browser has had its last reply — so they go into the
     # call's own log, where the saved file will keep them.
     for notice in take_notices():
         call.note(notice)
+    if call.opt_out and call.customer.get("id") and not call.test:
+        try:
+            contacts.set_opted_out([call.customer["id"]], True)
+            call.note("opted the contact out: they asked not to be called again")
+        except Exception as exc:
+            call.note(f"could not opt the contact out: {exc}")
     call.note(f"saved to {storage.save_call(call)}")
 
     with lock:
@@ -102,21 +136,178 @@ def finish(call: Call):
             _turns.pop(old.id, None)
 
 
+def whole(query: dict, key: str, default: int, low: int, high: int) -> int:
+    """A number from the query string, kept in range. Anything that isn't a number is the default."""
+    try:
+        return min(max(int(query.get(key) or default), low), high)
+    except ValueError:
+        return default
+
+
+def close_abandoned(call: Call, why: str):
+    """A call nobody finished: mark it, save what it has, and let it go. Safe to run twice."""
+    if not turn_lock(call.id).acquire(blocking=False):
+        return                                        # a turn is being handled right now: it is not abandoned
+    try:
+        if call.outcome:
+            return
+        call.outcome = "incomplete" if call.missing_required() else "completed"
+        call.end_reason, call.step = "hung up", "finish"
+        call.note(f"call closed: {why}")
+        finish(call)
+    finally:
+        turn_lock(call.id).release()
+
+
+def sweep_forever():
+    """Every half minute, close calls that have gone quiet for good (a closed laptop, a lost connection)."""
+    while True:
+        time.sleep(30)
+        try:
+            with lock:
+                stale = [c for c in calls.values() if not c.outcome and time.monotonic() - c.last_active > ABANDONED_AFTER]
+            for call in stale:
+                close_abandoned(call, f"no word for {ABANDONED_AFTER // 60} minutes")
+        except Exception:
+            traceback.print_exc()
+
+
+MAX_JSON = 2 * 1024 * 1024            # a setup, a contact, a message
+MAX_UPLOAD = 25 * 1024 * 1024         # a contacts file, or a recording of one turn
+
+# What a page may load and do. Everything it uses is served from here: the app, its fonts, the voice model (and
+# the WebAssembly that runs it). Nothing from elsewhere runs, and nothing may put this page in a frame.
+SECURITY_HEADERS = {
+    "Content-Security-Policy": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; "
+                               "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' blob: data:; "
+                               "media-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; "
+                               "base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "microphone=(self), camera=(), geolocation=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+}
+
+
+class TooLarge(Exception):
+    pass
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "voice_call"
     protocol_version = "HTTP/1.1"                 # needed for a streamed reply
+
+    def end_headers(self):
+        for name, value in SECURITY_HEADERS.items():
+            self.send_header(name, value)
+        if self.secure_cookie():
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
+        super().end_headers()
+
+    def begin(self):
+        """The start of every request. One handler serves every request on a connection, so nothing from the last
+        one may be left over: not who it was, and not what it was for."""
+        scope.set_owner("")
+        usage.set_tag("other")
 
     def log_message(self, format, *args):         # quieter console
         pass
 
     # ── sending ──────────────────────────────────────────────────────────────
-    def send_json(self, data, status=200):
+    def send_json(self, data, status=200, headers=None):
         body = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
+
+    # ── who is asking ────────────────────────────────────────────────────────
+    def session_token(self) -> str:
+        jar = SimpleCookie()
+        try:
+            jar.load(self.headers.get("Cookie", ""))
+        except Exception:
+            return ""
+        return jar[accounts.COOKIE].value if accounts.COOKIE in jar else ""
+
+    def current_user(self):
+        """The signed-in person, or None. Looked up afresh each time: a connection is reused for many requests."""
+        return accounts.user_for(self.session_token())
+
+    def secure_cookie(self) -> bool:
+        # Behind HTTPS (a proxy says so) the cookie is marked Secure; on http://127.0.0.1 it cannot be.
+        return self.headers.get("X-Forwarded-Proto", "") == "https" or os.getenv("COOKIE_SECURE") == "1"
+
+    def same_origin(self) -> bool:
+        """A write must come from this site's own pages. SameSite cookies already stop most forgeries; this closes the rest."""
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True                                # not a browser cross-site request: scripts and tools send none
+        return urlparse(origin).netloc == self.headers.get("Host", "")
+
+    def auth_route(self, route: str) -> bool:
+        """/api/auth/*: who you are, and signing in, up and out. Returns True when the route was one of these."""
+        if route == "/api/auth/me":
+            user = self.current_user()
+            self.send_json({"user": user, "needs_code": bool(accounts.signup_code()),
+                            "first": user is None and accounts.count() == 0})
+            return True
+        if not route.startswith("/api/auth/") or self.command != "POST":
+            return False
+        data = self.body()
+        address = self.client_address[0]
+        try:
+            if route == "/api/auth/signup":
+                was_empty = accounts.count() == 0
+                user, token = accounts.sign_up(data.get("email"), data.get("password"), data.get("name") or "",
+                                               data.get("code") or "", address)
+                if was_empty:
+                    scope.adopt_legacy(user["id"])    # what was made before accounts existed becomes theirs
+            elif route == "/api/auth/signin":
+                user, token = accounts.sign_in(data.get("email"), data.get("password"), address)
+            elif route == "/api/auth/verify":
+                accounts.verify_email(str(data.get("token") or ""))
+                self.send_json({"ok": True})
+                return True
+            elif route == "/api/auth/forgot":
+                accounts.request_reset(data.get("email"), address)
+                self.send_json({"ok": True})                 # the same answer whether or not there is such an account
+                return True
+            elif route == "/api/auth/reset":
+                accounts.reset_password(str(data.get("token") or ""), str(data.get("password") or ""), address)
+                self.send_json({"ok": True})
+                return True
+            elif route == "/api/auth/signout":
+                accounts.sign_out(self.session_token())
+                self.send_json({"ok": True}, headers={"Set-Cookie": accounts.cookie_header("", secure=self.secure_cookie(), clear=True)})
+                return True
+            else:
+                return False
+        except accounts.Problem as problem:
+            self.send_json({"error": str(problem)}, problem.status)
+            return True
+        self.send_json({"user": user}, headers={"Set-Cookie": accounts.cookie_header(token, secure=self.secure_cookie())})
+        return True
+
+    def own_call(self, call_id: str):
+        """A call in progress, only if it is the signed-in person's: someone else's looks like no call at all."""
+        call = calls.get(call_id)
+        return call if call is not None and call.owner == scope.owner() else None
+
+    def need_user(self):
+        """Everything under /api/ except signing in belongs to someone. Returns the person, or sends a 401 and returns None."""
+        user = self.current_user()
+        if user is None:
+            scope.set_owner("")
+            self.send_json({"error": "Sign in to continue.", "signin": True}, 401)
+        else:
+            scope.set_owner(user["id"])           # everything stored from here on is this person's
+        return user
 
     def send_file(self, name: str):
         path = (settings.WEB_FOLDER / name).resolve()
@@ -163,42 +354,66 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     # ── receiving ────────────────────────────────────────────────────────────
+    def _read(self, limit: int) -> bytes:
+        try:
+            size = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            size = -1
+        if size < 0 or size > limit:
+            self.close_connection = True                 # the rest of it is not read, so the connection cannot be reused
+            raise TooLarge()
+        return self.rfile.read(size)
+
     def body(self) -> dict:
-        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
-        return json.loads(raw or "{}")
+        data = json.loads(self._read(MAX_JSON) or "{}")
+        if not isinstance(data, dict):
+            raise ValueError("expected an object")
+        return data
 
     def raw_body(self) -> bytes:
-        return self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        return self._read(MAX_UPLOAD)
 
     # ── pages ────────────────────────────────────────────────────────────────
     def do_GET(self):
         url = urlparse(self.path)
         route = url.path
+        self.begin()
         try:
-            if route in ("/", "/drafts", "/studio", "/voices", "/call", "/history", "/contacts", "/results"):
+            if route in ("/", "/drafts", "/studio", "/voices", "/call", "/history", "/contacts", "/results",
+                         "/account", "/verify", "/reset"):
                 return self.send_file("index.html")     # one page: the page shown is chosen in the browser
             # The built UI (frontend/, built into web/): its scripts and styles, the voice model, the icon.
             if route.startswith(("/assets/", "/vendor/")) or route == "/favicon.svg":
                 return self.send_file(route.removeprefix("/"))
+            if route.startswith("/api/") and not self.auth_route(route) and self.need_user() is None:
+                return
+            if route.startswith("/api/auth/"):
+                if route != "/api/auth/me":
+                    self.send_json({"error": "unknown route"}, 404)
+                return
+            if route.startswith(("/api/account", "/api/admin")):
+                return self.account_read(route, {key: values[0] for key, values in parse_qs(url.query).items()})
             if route == "/api/flows":
                 return self.send_json({"flows": [flow.model_dump() for flow in storage.list_flows()]})
             if route == "/api/calls":
                 query = {key: values[0] for key, values in parse_qs(url.query).items()}
                 return self.send_json(storage.recent_calls(
-                    limit=min(max(int(query.get("limit") or 20), 1), 100), offset=max(int(query.get("offset") or 0), 0),
+                    limit=whole(query, "limit", 20, 1, 100), offset=whole(query, "offset", 0, 0, 10**9),
                     flow=query.get("flow", ""), outcome=query.get("outcome", ""), contact=query.get("contact", "")))
             if route == "/api/contacts" or route.startswith("/api/contacts/"):
                 return self.contacts_read(route.removeprefix("/api/contacts").strip("/"),
                                           {key: values[0] for key, values in parse_qs(url.query).items()})
             if route == "/api/stats":
-                return self.send_json(results.stats())
+                return self.send_json(results.stats(tests="tests" in parse_qs(url.query)))
             if route.startswith("/api/flows/") and route.count("/") == 4:
-                return self.flow_read(route.split("/")[3], route.split("/")[4])
+                return self.flow_read(route.split("/")[3], route.split("/")[4], "tests" in parse_qs(url.query))
             if route == "/api/models":
                 return self.send_json({"models": gemini.current})
             if route == "/api/voices":
                 return self.send_json({"voices": voices.choices(), "default": settings.ELEVEN_VOICE})
             return self.send_json({"error": "unknown route"}, 404)
+        except credentials.Blocked as exc:
+            return self.send_json({"error": str(exc), "blocked": True}, exc.status)
         except Exception as exc:
             traceback.print_exc()
             return self.send_json({"error": str(exc)}, 500)
@@ -206,11 +421,42 @@ class Handler(BaseHTTPRequestHandler):
     # ── actions ──────────────────────────────────────────────────────────────
     def do_POST(self):
         route = urlparse(self.path).path
+        self.begin()
         try:
+            if not self.same_origin():
+                return self.send_json({"error": "That request did not come from this site."}, 403)
+            if route.startswith("/api/auth/"):
+                if self.auth_route(route):
+                    return
+            elif self.need_user() is None:
+                return
+            if route.startswith(("/api/account", "/api/admin")):
+                return self.account_action(route, self.body())
+            if route in ("/api/suggest", "/api/suggest/reword") or route.startswith("/api/assist"):
+                usage.set_tag("studio")
+            if route == "/api/hear":
+                usage.set_tag("voice")
             if route == "/api/flows":
                 data = self.body()
                 setup = BusinessSetup(**data["setup"]) if data.get("setup") else None
                 return self.send_json(storage.new_flow(data.get("name") or "Untitled flow", setup).model_dump())
+
+            if route == "/api/flows/delete":
+                with flow_lock:
+                    ids = [str(i) for i in (self.body().get("ids") or [])][:500]
+                    gone = []
+                    for one in dict.fromkeys(ids):
+                        try:
+                            storage.get_flow(one)
+                        except KeyError:
+                            continue
+                        storage.delete_flow(one)
+                        gone.append(one)
+                return self.send_json({"deleted": gone})
+
+            if route == "/api/calls/delete":
+                ids = [str(i) for i in (self.body().get("ids") or [])][:500]
+                return self.send_json({"deleted": storage.delete_calls(ids)})
 
             if route.startswith("/api/flows/"):
                 return self.flow_action(route.removeprefix("/api/flows/"))
@@ -227,6 +473,22 @@ class Handler(BaseHTTPRequestHandler):
                 options = reword(BusinessSetup(**data["setup"]), data.get("text") or "", data.get("kind") or "ask")
                 return self.send_json({"options": options, "notices": take_notices()})
 
+            if route == "/api/assist/next":
+                data = self.body()
+                found = suggest_next(BusinessSetup(**data["setup"]), str(data.get("after") or ""))
+                return self.send_json({"options": [q.model_dump() for q in found], "notices": take_notices()})
+
+            if route == "/api/assist/context":
+                found = rewrite_context(str(self.body().get("text") or ""))
+                return self.send_json({"text": found, "notices": take_notices()})
+
+            if route == "/api/assist":
+                data = self.body()
+                messages = [m for m in data.get("messages") or [] if isinstance(m, dict)]
+                refs = [str(r) for r in data.get("refs") or []]
+                found = assist(BusinessSetup(**data["setup"]), messages, refs)
+                return self.send_json({**found, "notices": take_notices()})
+
             if route == "/api/hear":
                 return self.hear_voice()
 
@@ -236,12 +498,23 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/call/turn":
                 return self.take_turn()
 
+            if route == "/api/call/end":
+                # The page was closed mid-call. The browser sends this as it leaves, so nobody reads the answer.
+                call = self.own_call(str(self.body().get("call") or ""))
+                if call is not None:
+                    close_abandoned(call, "the page was closed")
+                return self.send_json({"ok": True})
+
             return self.send_json({"error": "unknown route"}, 404)
         except ValidationError as exc:
             return self.send_json({"error": explain(exc)}, 400)
         except contacts.Problem as exc:
             return self.send_json({"error": str(exc)}, 400)
-        except (json.JSONDecodeError, KeyError) as exc:
+        except TooLarge:
+            return self.send_json({"error": "That is too big to send."}, 413)
+        except credentials.Blocked as exc:
+            return self.send_json({"error": str(exc), "blocked": True}, exc.status)
+        except (json.JSONDecodeError, KeyError, ValueError) as exc:
             return self.send_json({"error": f"the request was not understood: {exc}"}, 400)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             # The browser stopped listening mid-reply. That is what talking over the assistant looks
@@ -252,6 +525,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": f"{type(exc).__name__}: {exc}"}, 500)
 
     def flow_action(self, rest: str):
+        with flow_lock:
+            return self._flow_action(rest)
+
+    def _flow_action(self, rest: str):
         """/api/flows/<id> saves the draft; /<id>/publish, /<id>/discard and /<id>/delete do what they say."""
         flow_id, _, action = rest.partition("/")
         try:
@@ -337,7 +614,7 @@ class Handler(BaseHTTPRequestHandler):
             flow.setup = BusinessSetup(**data["setup"])
         return self.send_json(storage.save_flow(flow).model_dump())
 
-    def flow_read(self, flow_id: str, what: str):
+    def flow_read(self, flow_id: str, what: str, tests: bool = False):
         """GET /api/flows/<id>/results, and /<id>/export.csv: one flow's answers, summed up or one row a call."""
         try:
             flow = storage.get_flow(flow_id)
@@ -346,9 +623,9 @@ class Handler(BaseHTTPRequestHandler):
         if what == "results":
             groups = flow.groups
             return self.send_json(results.flow_results(
-                flow, contacts.audience(groups, results.called_contacts(flow_id)) if groups else {}))
+                flow, contacts.audience(groups, results.called_contacts(flow_id)) if groups else {}, tests=tests))
         if what == "export.csv":
-            body = ("\ufeff" + results.flow_csv(flow)).encode("utf-8")      # the mark makes Excel read it as UTF-8
+            body = ("\ufeff" + results.flow_csv(flow, tests=tests)).encode("utf-8")      # the mark makes Excel read it as UTF-8
             name = "".join(ch if ch.isalnum() else "-" for ch in flow.name).strip("-").lower() or "flow"
             self.send_response(200)
             self.send_header("Content-Type", "text/csv; charset=utf-8")
@@ -359,13 +636,92 @@ class Handler(BaseHTTPRequestHandler):
             return
         return self.send_json({"error": "unknown route"}, 404)
 
+    # ── the account ──────────────────────────────────────────────────────────
+    def need_admin(self):
+        if not self.current_user()["is_admin"]:
+            self.send_json({"error": "Only the person running this server can do that."}, 403)
+            return False
+        return True
+
+    def account_read(self, route: str, query: dict):
+        user = self.current_user()
+        if route == "/api/account":
+            me = accounts.get(user["id"])
+            return self.send_json({"user": me, "plan": usage.plan(me), "keys": credentials.status(me["id"]),
+                                   "mail": mailer.configured(), "default_allowance": settings.FREE_ALLOWANCE_USD,
+                                   "prices": settings.PRICES})
+        if route == "/api/account/usage":
+            return self.send_json(usage.summary(user["id"], whole(query, "days", 30, 1, 365)))
+        if route == "/api/account/activity":
+            return self.send_json({"events": accounts.history(user["id"])})
+        if route == "/api/admin/users":
+            if not self.need_admin():
+                return
+            spent = usage.month_totals()
+            return self.send_json({"default_allowance": settings.FREE_ALLOWANCE_USD, "users": [
+                {**one, "spent": round(spent.get(one["id"], 0.0), 4)} for one in accounts.everyone()]})
+        return self.send_json({"error": "unknown route"}, 404)
+
+    def account_action(self, route: str, data: dict):
+        user, address = self.current_user(), self.client_address[0]
+        try:
+            if route == "/api/account/profile":
+                return self.send_json({"user": accounts.update_profile(user["id"], str(data.get("name") or ""))})
+            if route == "/api/account/password":
+                accounts.change_password(user["id"], str(data.get("current") or ""), str(data.get("new") or ""),
+                                         keep_token=self.session_token(), address=address)
+                return self.send_json({"ok": True})
+            if route == "/api/account/signout-everywhere":
+                accounts.sign_out_everywhere(user["id"])
+                accounts.log(user["id"], "Signed out everywhere", address=address)
+                return self.send_json({"ok": True}, headers={"Set-Cookie": accounts.cookie_header(
+                    "", secure=self.secure_cookie(), clear=True)})
+            if route == "/api/account/resend":
+                accounts.throttle("reset", user["id"])
+                accounts.send_verification(user["id"])
+                return self.send_json({"ok": True})
+            if route == "/api/account/keys":
+                note = credentials.save(user["id"], str(data.get("service") or ""), str(data.get("key") or ""), address)
+                return self.send_json({"note": note, "keys": credentials.status(user["id"])})
+            if route == "/api/account/keys/mode":
+                credentials.set_mode(user["id"], str(data.get("service") or ""), str(data.get("mode") or ""), address)
+                return self.send_json({"keys": credentials.status(user["id"])})
+            if route == "/api/account/keys/remove":
+                credentials.remove(user["id"], str(data.get("service") or ""), address)
+                return self.send_json({"keys": credentials.status(user["id"])})
+            if route == "/api/account/delete":
+                accounts.check_own_password(user["id"], str(data.get("password") or ""), address)
+                with lock:
+                    for one in [c.id for c in calls.values() if c.owner == user["id"]]:
+                        calls.pop(one, None)
+                accounts.delete_account(user["id"])
+                scope.erase(user["id"])
+                return self.send_json({"ok": True}, headers={"Set-Cookie": accounts.cookie_header(
+                    "", secure=self.secure_cookie(), clear=True)})
+            if route.startswith("/api/admin/users/"):
+                if not self.need_admin():
+                    return
+                target = route.removeprefix("/api/admin/users/")
+                if target == user["id"] and data.get("disabled"):
+                    return self.send_json({"error": "You cannot turn off your own account."}, 400)
+                allowance = "keep"
+                if "allowance" in data:
+                    raw = data["allowance"]
+                    allowance = None if raw in (None, "") else max(0.0, float(raw))
+                accounts.administer(target, allowance=allowance,
+                                    disabled=bool(data["disabled"]) if "disabled" in data else None)
+                return self.send_json({"ok": True})
+        except accounts.Problem as problem:
+            return self.send_json({"error": str(problem)}, problem.status)
+        return self.send_json({"error": "unknown route"}, 404)
+
     # ── contacts ─────────────────────────────────────────────────────────────
     def contacts_read(self, rest: str, query: dict):
         """GET /api/contacts (a page of them), /groups, /sources, and /<id> (one, with its calls)."""
         if rest == "":
             return self.send_json(contacts.list_contacts(
                 group=query.get("group", ""), search=query.get("search", ""), status=query.get("status", ""),
-                offset=max(int(query.get("offset") or 0), 0), limit=min(max(int(query.get("limit") or 50), 1), 200)))
+                offset=whole(query, "offset", 0, 0, 10**9), limit=whole(query, "limit", 50, 1, 200)))
         if rest == "groups":
             return self.send_json(contacts.list_groups())
         if rest == "sources":
@@ -477,18 +833,28 @@ class Handler(BaseHTTPRequestHandler):
         if problems:
             return self.send_json({"error": " ".join(problems)}, 400)
 
-        call, greeting = engine.start(setup, data.get("customer") or {})
         flow_id = str(data.get("flow_id") or "")
-        call.flow_id = flow_id if flow_id.isalnum() and len(flow_id) <= 32 else ""
+        flow_id = flow_id if flow_id.isalnum() and len(flow_id) <= 32 else ""
+        test = bool(data.get("test", True))           # this page is a test bench: only a real dialler says otherwise
+        # Not begun at all if it could not be paid for, so the person is told now rather than mid-sentence.
+        credentials.resolve("gemini")
+        if data.get("speak", True) and voices.ready():
+            credentials.resolve("elevenlabs")
+        usage.set_tag("test" if test else "call", flow_id)
+
+        call, greeting = engine.start(setup, data.get("customer") or {})
+        call.owner = scope.owner()
+        call.flow_id, call.test = flow_id, test
         with lock:
             calls[call.id] = call
         self.stream_reply(call, heard="", say=greeting, ended=False, think_ms=0,
                           with_audio=bool(data.get("speak", True)))
 
     def take_turn(self):
-        call = calls.get(self.headers.get("X-Call-Id", ""))
+        call = self.own_call(self.headers.get("X-Call-Id", ""))
         if call is None:
             return self.send_json({"error": "that call has finished or was never started"}, 404)
+        usage.set_tag("test" if call.test else "call", call.flow_id)
         speaking = self.headers.get("X-Speak", "1") != "0"
         interrupted = self.headers.get("X-Interrupted") == "1"     # they talked over the last reply
 
@@ -499,6 +865,9 @@ class Handler(BaseHTTPRequestHandler):
         typed = "" if audio else (self.body().get("message") or "")
 
         with turn_lock(call.id):
+            if call.outcome:                       # closed meanwhile (the line went quiet): nothing more to say
+                return self.send_json({"error": "that call has finished or was never started"}, 404)
+            call.last_active = time.monotonic()
             heard_ms = 0
             if audio:
                 began = time.monotonic()
@@ -515,7 +884,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self.stream_reply(call, heard="", say="", ended=False, think_ms=0, heard_ms=heard_ms,
                                          with_audio=False, ignored=True)
 
-            result = engine.reply_to(call, heard, interrupted=interrupted)
+            try:
+                result = engine.reply_to(call, heard, interrupted=interrupted)
+            except credentials.Blocked as exc:
+                # Not the AI failing: the account cannot pay for the next turn. Say why, rather than a fake "sorry".
+                return self.send_json({"error": str(exc), "blocked": True}, exc.status)
+            except Exception as exc:
+                # The AI failed or timed out. Silence is the worst thing to give a customer: say so and carry on.
+                traceback.print_exc()
+                call.note(f"the AI failed on this turn: {exc}")
+                result = {"say": FALLBACK_LINE, "ended": False, "think_ms": 0}
+                call.add("assistant", FALLBACK_LINE)
+            call.last_active = time.monotonic()
             if result["ended"]:
                 storage.save_call(call)        # written before the goodbye, so "all confirmed" is true
             self.stream_reply(call, heard=heard, say=result["say"], ended=result["ended"],
@@ -564,11 +944,18 @@ def serve(port: int = 8000, open_browser: bool = True):
         gemini.client()
     except Exception as exc:
         print(f"  note: {exc}")
+    # There is always an account to sign in with. Made on a fresh install, it takes over what was there before accounts.
+    made, note = accounts.ensure_default()
+    if made and accounts.count() == 1:
+        scope.adopt_legacy(made["id"])
+    if note:
+        print(f"  {note}")
     try:
         server = OnePortServer(("127.0.0.1", port), Handler)
     except OSError:
         raise SystemExit(f"Port {port} is already in use, most likely by Voice Call started earlier. Stop that one "
                          f"first, or run this one on another port: python -m voice_call --port {port + 1}")
+    threading.Thread(target=sweep_forever, daemon=True).start()
     address = f"http://127.0.0.1:{port}"
     print(f"Voice Call is running at {address}")
     print("  /        set up your business")

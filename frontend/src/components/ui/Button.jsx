@@ -1,8 +1,8 @@
 import { cn } from "../../lib/cn.js";
 
 const VARIANTS = {
-  // Ink, for the one action that matters on a screen.
-  primary: "bg-ink text-white hover:bg-ink-hover disabled:opacity-50",
+  // The brand violet, for the one action that matters on a screen.
+  primary: "bg-brand text-white hover:bg-brand-hover disabled:opacity-50",
   // The brand violet, for adding and for anything the AI does.
   brand: "bg-brand text-white shadow-[0_4px_12px_rgb(110_76_245/0.3)] hover:bg-brand-hover disabled:opacity-50",
   tinted: "bg-brand-soft text-brand-ink hover:bg-[#e6dfff]",

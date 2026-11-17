@@ -58,31 +58,50 @@ export function UnitInput({ unit, className, id, ...props }) {
 }
 
 /**
- * One of a few choices, as a segmented control: every option in view, the picked one raised. A narrow
- * screen can't fit the row, so there it becomes an ordinary dropdown.
+ * One of a few choices, every option in view. Pick the shape by how many there are and how long they read:
+ * "segmented" (default) is two or three short ones sharing a row, "pills" is more of them wrapping onto
+ * lines, and "list" is longer ones, one to a row. A label written "Name · detail" shows the detail at the right.
  */
-export function Choices({ label, options, value, onChange, hint, className }) {
+export function Choices({ label, options, value, onChange, hint, variant = "segmented", className }) {
   const id = useId();
   return (
-    <div className={cn("flex min-w-0 flex-col gap-1.5", className)}>
-      <label id={id} htmlFor={`${id}-select`} className="text-[13px] font-medium text-ink">{label}</label>
-      <div role="radiogroup" aria-labelledby={id}
-           className="hidden self-start rounded-full bg-fill p-0.5 sm:inline-flex">
-        {options.map(([option, text]) => {
-          const picked = option === value;
-          return (
-            <button key={option} type="button" role="radio" aria-checked={picked} onClick={() => onChange(option)}
-                    className={cn("h-8 rounded-full px-3.5 text-[13px] font-semibold whitespace-nowrap transition-colors",
-                                  picked ? "bg-white text-ink shadow-[0_1px_2px_rgb(17_17_20/0.1)]"
-                                    : "text-muted hover:text-ink")}>
-              {text}
-            </button>
-          );
-        })}
-      </div>
-      <div className="sm:hidden">
-        <Select id={`${id}-select`} options={options} value={value} onChange={(e) => onChange(e.target.value)} />
-      </div>
+    <div className={cn("flex min-w-0 flex-col gap-2", className)}>
+      <span id={id} className="text-[13px] font-medium text-ink">{label}</span>
+      {variant === "pills" && <Pills options={options} value={value} onChange={onChange} label={label} />}
+      {variant === "list" && (
+        <div role="radiogroup" aria-labelledby={id} className="flex flex-col gap-2">
+          {options.map(([option, text]) => {
+            const picked = option === value;
+            const [title, detail] = String(text).split(" · ");
+            return (
+              <button key={option} type="button" role="radio" aria-checked={picked} onClick={() => onChange(option)}
+                      className={cn("flex items-center gap-3 rounded-xl border px-3.5 py-2.5 text-left transition-colors",
+                                    picked ? "border-brand bg-brand-wash" : "border-edge bg-white hover:bg-hover")}>
+                <span aria-hidden="true"
+                      className={cn("grid size-4 shrink-0 place-items-center rounded-full border", picked ? "border-brand" : "border-[#c9c9d1]")}>
+                  {picked && <span className="size-2 rounded-full bg-brand" />}
+                </span>
+                <span className="min-w-0 flex-1 text-[14px] font-medium text-ink">{title}</span>
+                {detail && <span className="shrink-0 text-[12px] text-muted tabular-nums">{detail}</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {variant === "segmented" && (
+        <div role="radiogroup" aria-labelledby={id} className="flex w-full rounded-full bg-fill p-0.5">
+          {options.map(([option, text]) => {
+            const picked = option === value;
+            return (
+              <button key={option} type="button" role="radio" aria-checked={picked} onClick={() => onChange(option)}
+                      className={cn("h-8 min-w-0 flex-1 rounded-full px-3 text-[13px] font-semibold whitespace-nowrap transition-colors",
+                                    picked ? "bg-white text-ink shadow-[0_1px_2px_rgb(17_17_20/0.1)]" : "text-muted hover:text-ink")}>
+                {text}
+              </button>
+            );
+          })}
+        </div>
+      )}
       {hint && <p className="text-[12px] leading-relaxed text-muted">{hint}</p>}
     </div>
   );
@@ -122,7 +141,7 @@ export function Pills({ options, value, onChange, label, className }) {
         return (
           <button key={option} type="button" role="radio" aria-checked={picked} onClick={() => onChange(option)}
                   className={cn("h-8 rounded-full border px-3.5 text-[13px] font-semibold whitespace-nowrap transition-colors",
-                                picked ? "border-ink bg-ink text-white" : "border-edge bg-white text-ink hover:bg-hover")}>
+                                picked ? "border-brand bg-brand-soft text-brand-ink" : "border-edge bg-white text-ink hover:bg-hover")}>
             {text}
           </button>
         );

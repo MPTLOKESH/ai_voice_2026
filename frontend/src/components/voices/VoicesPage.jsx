@@ -75,7 +75,7 @@ export function VoicesPage({ voices, loaded, voice, setupState }) {
                 </span>
               ) : (
                 <button type="button" onClick={() => use(one)}
-                        className="rounded-full bg-ink px-4 py-2 text-[13px] font-semibold whitespace-nowrap text-white transition-colors hover:bg-brand">
+                        className="rounded-full bg-brand px-4 py-2 text-[13px] font-semibold whitespace-nowrap text-white transition-colors hover:bg-brand-hover">
                   Use voice
                 </button>
               )}

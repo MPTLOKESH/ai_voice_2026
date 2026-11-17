@@ -4,18 +4,21 @@
  * 24 kHz audio. `turn()` hands the text over as soon as it lands, and each piece of audio as it arrives.
  */
 
+export const SIGNED_OUT = "voice-call-signed-out";
+
 /**
  * One request, and an Error whose message says what a person can do about it: the server isn't there, the
  * server is older than this page (it has to be restarted to learn the new routes), or what the server said.
  */
-async function request(url, { body, method = body === undefined ? "GET" : "POST", keepalive = false } = {}, fallback = "something went wrong") {
+async function request(url, { body, method = body === undefined ? "GET" : "POST", keepalive = false, signal } = {}, fallback = "something went wrong") {
   let response;
   try {
     response = await fetch(url, {
-      method, keepalive,
+      method, keepalive, signal,
       ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
     });
-  } catch {
+  } catch (failure) {
+    if (failure?.name === "AbortError") throw failure;       // stopped on purpose: not a server problem
     throw new Error("Could not reach the server. Is `python -m voice_call` still running?");
   }
   let data = null;
@@ -23,6 +26,8 @@ async function request(url, { body, method = body === undefined ? "GET" : "POST"
   if (response.status === 404 && data?.error === "unknown route") {
     throw new Error("The server is older than this page. Stop it, run `python -m voice_call` again, and reload.");
   }
+  // The session ended (signed out in another tab, or expired): the app goes back to the sign-in page.
+  if (response.status === 401 && data?.signin) window.dispatchEvent(new Event(SIGNED_OUT));
   if (!response.ok || !data || data.error) {
     // The status and the rest of the answer travel with the message: a 409 carries the flow as stored now.
     throw Object.assign(new Error(data?.error || `${fallback} (the server answered ${response.status})`),
@@ -30,6 +35,35 @@ async function request(url, { body, method = body === undefined ? "GET" : "POST"
   }
   return data;
 }
+
+// ── accounts ────────────────────────────────────────────────────────────────
+
+/** Who is signed in: {user: {id, email, name} | null, needs_code, first}. */
+export const me = () => request("/api/auth/me", {}, "could not check who is signed in");
+export const signUp = (body) => request("/api/auth/signup", { body }, "could not make the account");
+export const signIn = (body) => request("/api/auth/signin", { body }, "could not sign in");
+export const signOut = () => request("/api/auth/signout", { body: {} }, "could not sign out");
+export const verifyEmail = (token) => request("/api/auth/verify", { body: { token } }, "could not confirm the email");
+export const forgotPassword = (email) => request("/api/auth/forgot", { body: { email } }, "could not send the link");
+export const resetPassword = (token, password) => request("/api/auth/reset", { body: { token, password } }, "could not reset the password");
+
+/** {user, plan: {allowance, used, left, resets, own_used}, keys: {gemini|elevenlabs: {label, does, where, ours_available, has_own, last4, mode}}, mail, default_allowance} */
+export const account = () => request("/api/account", {}, "could not load your account");
+/** Spending over the last `days`: {totals, daily: [{day, ours, own}], by_service, by_kind, by_flow, recent, names}. */
+export const accountUsage = (days) => request(`/api/account/usage?days=${days}`, {}, "could not load your usage");
+export const accountActivity = () => request("/api/account/activity", {}, "could not load the activity");
+export const saveProfile = (name) => request("/api/account/profile", { body: { name } }, "could not save");
+export const changePassword = (current, next) => request("/api/account/password", { body: { current, new: next } }, "could not change the password");
+export const signOutEverywhere = () => request("/api/account/signout-everywhere", { body: {} }, "could not sign out everywhere");
+export const resendVerification = () => request("/api/account/resend", { body: {} }, "could not send the email");
+/** Checks the key with the provider, then stores it encrypted. Resolves with {note, keys}; the key is never sent back. */
+export const saveKey = (service, key) => request("/api/account/keys", { body: { service, key } }, "could not save the key");
+export const setKeyMode = (service, mode) => request("/api/account/keys/mode", { body: { service, mode } }, "could not switch");
+export const removeKey = (service) => request("/api/account/keys/remove", { body: { service } }, "could not remove the key");
+export const deleteAccount = (password) => request("/api/account/delete", { body: { password } }, "could not delete the account");
+/** For the person running the server: every account, its spend this month, its allowance. */
+export const adminUsers = () => request("/api/admin/users", {}, "could not load the accounts");
+export const adminChange = (id, changes) => request(`/api/admin/users/${id}`, { body: changes }, "could not change that account");
 
 /**
  * Every flow, most recently edited first: {id, name, status, channels, audience, when, scheduled_for, created,
@@ -46,7 +80,15 @@ export const saveFlow = (id, { name, setup, version }, { keepalive = false } = {
   request(`/api/flows/${id}`, { body: { name, setup, version }, keepalive }, "could not save");
 export const discardFlow = (id) => request(`/api/flows/${id}/discard`, { body: {} }, "could not discard the changes");
 export const publishFlow = (id, options) => request(`/api/flows/${id}/publish`, { body: options }, "could not publish");
+export const deleteFlows = (ids) => request("/api/flows/delete", { body: { ids } }, "could not delete");
+export const deleteCalls = (ids) => request("/api/calls/delete", { body: { ids } }, "could not delete the calls");
 export const deleteFlow = (id) => request(`/api/flows/${id}/delete`, { body: {} }, "could not delete");
+/** One reply in the studio chat: {reply, changed, questions}, `questions` being the whole proposed list of steps. */
+export const assist = (setup, messages, refs, signal) => request("/api/assist", { body: { setup, messages, refs }, signal }, "the assistant could not answer");
+/** A few steps that could come straight after the one saved as `after` ("" is the opening): {options}. */
+export const suggestNext = (setup, after, signal) => request("/api/assist/next", { body: { setup, after }, signal }, "could not suggest what comes next");
+/** The rough note about why the call is made, rewritten properly: {text}. */
+export const rewriteContext = (text) => request("/api/assist/context", { body: { text } }, "could not rewrite that");
 export const suggestQuestions = (setup) => request("/api/suggest", { body: setup }, "could not suggest questions");
 
 export async function voices() {
@@ -117,10 +159,11 @@ export async function turn({ url, headers, body, signal, onReply, onAudio }) {
   return head ? { ...head, audioBytes } : null;
 }
 
+/** Calls made from this page are tests: the server keeps them out of a flow's results. */
 export const startCall = (setup, customer, speak, hooks, signal, flowId = "") => turn({
   url: "/api/call/start",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ setup, customer, speak, flow_id: flowId }),
+  body: JSON.stringify({ setup, customer, speak, flow_id: flowId, test: true }),
   signal,
   ...hooks,
 });

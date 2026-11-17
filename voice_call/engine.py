@@ -4,6 +4,7 @@ The AI proposes; `keep_answers` and `next_step` are the only places a value is s
 """
 from __future__ import annotations
 
+import re
 import time
 from datetime import date
 
@@ -46,6 +47,13 @@ def background(call: Call) -> str:
 
 
 HOW_MANY = {1: "once", 2: "twice"}
+
+# Said plainly, these end the call however short they are. Other short "stop" guesses are usually a mishearing.
+PLAIN_STOP = re.compile(r"\b(stop|bye|goodbye|hang up|not interested|no thanks?|no thank you|leave me alone|"
+                        r"don'?t (want|call)|do not (want|call))\b", re.I)
+# Asking never to be called again: the call ends, and the contact is opted out.
+NEVER_AGAIN = re.compile(r"\b(don'?t|do not|never|stop)\b.{0,25}\b(call|ring|phone|contact)[a-z]*\b.{0,20}\b(me|us|again|anymore|any more)\b"
+                         r"|\btake me off\b|\bremove (me|my number)\b|\bunsubscribe\b|\bdo not call (list|registry)\b", re.I)
 
 
 def hurry(call: Call):
@@ -192,6 +200,27 @@ def end_here(call: Call, step: Question, message: str, think_ms: int = 0) -> dic
     return {"say": say, "ended": True, "think_ms": think_ms}
 
 
+def go_back(call: Call, loop: Question, message: str, think_ms: int = 0) -> dict:
+    """A loop step's condition is met: forget the answers from the step it names up to the loop, and ask
+    from there again. The reply already written was for moving on, so a new one is written for going back.
+    """
+    again = call.loop_range(loop)
+    for q in again:
+        call.answers.pop(q.save_as, None)
+        call.skipped.discard(q.save_as)
+        call.failed.pop(q.save_as, None)
+    call.loops[loop.save_as] = call.loops.get(loop.save_as, 0) + 1
+    call.note(f"going back to {loop.back_to} ({loop.save_as}): time {call.loops[loop.save_as]} of {loop.times}")
+    call.step = "ask"
+    began = time.monotonic()
+    words = loop.ask.strip()
+    task = prompts.STEP_TASKS["go_back"].format(
+        message=f", say this in your own words: {words}" if words else "", question=call.unanswered()[0].ask)
+    say = think(call, message, task).reply
+    call.add("assistant", say)
+    return {"say": say, "ended": False, "think_ms": think_ms + int((time.monotonic() - began) * 1000)}
+
+
 def opening(call: Call) -> str:
     """The first thing said. Written by the AI like everything else, so the call opens in its own voice."""
     prompt = prompts.OPENING_JOB.format(
@@ -266,7 +295,14 @@ def reply_to(call: Call, message: str, interrupted: bool = False) -> dict:
     # A few stray words are usually a mis-hearing, not someone asking to end the call. Ending on that is
     # far worse than asking again, so only a real sentence may stop a call.
     intent = turn.intent
-    if intent == "wants_to_stop" and len(message.split()) < 3:
+    if NEVER_AGAIN.search(message):
+        call.opt_out = True
+        call.note("they asked not to be called again: opting them out")
+        intent = "wants_to_stop"
+    elif intent != "wants_to_stop" and PLAIN_STOP.search(message) and len(message.split()) <= 4:
+        intent = "wants_to_stop"
+        call.note(f"treating {message!r} as a request to stop")
+    if intent == "wants_to_stop" and len(message.split()) < 3 and not PLAIN_STOP.search(message) and not call.opt_out:
         call.note(f"ignoring 'wants to stop' from {message!r}: too short to be sure")
         intent = "answering"
 
@@ -274,6 +310,11 @@ def reply_to(call: Call, message: str, interrupted: bool = False) -> dict:
     stop = call.triggered_end() if intent != "wants_to_stop" else None
     if stop is not None:
         return end_here(call, stop, message, think_ms)
+
+    # A loop step whose condition has just been met sends the call back, before anything else is decided.
+    again = call.triggered_loop() if intent != "wants_to_stop" else None
+    if again is not None:
+        return go_back(call, again, message, think_ms)
 
     step, outcome = next_step(call, intent)
     if step != call.step:

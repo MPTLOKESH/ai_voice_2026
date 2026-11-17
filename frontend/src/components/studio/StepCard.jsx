@@ -1,33 +1,79 @@
-import { ArrowLeft, ArrowRight, CopyPlus, GitBranch, Minus, Play, Plus, Square, Trash2, X } from "lucide-react";
+import {
+  ArrowLeft, ArrowRight, Bot, CopyPlus, Flag, GitBranch, Megaphone, MessageCircleQuestion, Minus, Phone, PhoneForwarded, PhoneOff, Play,
+  Plus, Repeat, Square, UserRound,
+} from "lucide-react";
 import { useState } from "react";
 import { cn } from "../../lib/cn.js";
-import { OPTIONS, TYPES, commas } from "../../lib/setupForm.js";
+import { TYPES, commas } from "../../lib/setupForm.js";
 import { orb } from "../../lib/thread.js";
 import { Pills, Select, TextInput } from "../ui/fields.jsx";
+import { RewriteButton } from "./RewriteButton.jsx";
 
 const ANSWER_TYPES = [["text", "Text"], ["number", "Number"], ["date", "Date"], ["time", "Time"],
                       ["yes_no", "Yes / No"], ["choice", "Choice"]];
-const TRIES = [1, 2, 3, 4, 5].map((n) => [String(n), String(n)]);
+
+// What each kind of step is called at the top of its editor, and the badge it wears (the colours of its tile on the canvas).
+const HEADS = {
+  context: { kicker: "Say why it is calling", icon: MessageCircleQuestion, tile: "bg-why-soft text-why" },
+  open: { kicker: "The call starts", icon: Phone, tile: "bg-good text-white" },
+  close: { kicker: "At the end, the AI…", icon: PhoneOff, tile: "bg-bad text-white" },
+  ask: { kicker: "The AI asks…", icon: Bot, tile: "bg-brand-soft text-brand" },
+  answer: { kicker: "The customer answers…", icon: UserRound, tile: "bg-[#d3efdf] text-good" },
+  say: { kicker: "The AI tells them…", icon: Megaphone, tile: "bg-[#0891b2]/12 text-[#0e7490]" },
+  end: { kicker: "The call ends…", icon: PhoneOff, tile: "bg-bad text-white" },
+  handoff: { kicker: "The AI hands over…", icon: PhoneForwarded, tile: "bg-[#0d9488]/12 text-[#0f766e]" },
+  loop: { kicker: "The call goes back…", icon: Repeat, tile: "bg-loop-soft text-loop-ink" },
+};
+
+/** The badge and the line under the name at the top of a step's editor. */
+export function headOf(step) {
+  const key = step.kind === "end" && step.question?.handoff ? "handoff" : step.kind;
+  return HEADS[key] || HEADS.ask;
+}
 
 const IconButton = ({ label, icon: Icon, danger, ...props }) => (
   <button type="button" aria-label={label} title={label}
-          className={cn("grid size-[30px] place-items-center rounded-[10px] text-[#a3a3ad] transition-colors disabled:opacity-30",
+          className={cn("grid size-8 place-items-center rounded-full text-muted transition-colors disabled:opacity-30",
                         danger ? "hover:bg-bad-soft hover:text-bad" : "hover:bg-fill hover:text-ink")}
           {...props}>
-    <Icon aria-hidden="true" className="size-[15px]" strokeWidth={2} />
+    <Icon aria-hidden="true" className="size-4" strokeWidth={2} />
   </button>
 );
 
-/** The big soft box every card begins with: what the step says, in the size it will be read. */
 const hasKeyboard = () => window.matchMedia?.("(pointer: fine)").matches;
 
-const Say = ({ value, onChange, placeholder, rows = 3 }) => (
-  <textarea autoFocus={hasKeyboard()} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} rows={rows}
-            className="block w-full resize-none rounded-2xl bg-canvas px-4 py-3.5 text-[17px] leading-normal text-ink
-                       placeholder:text-faint focus:bg-[#f3f0ff] focus:ring-2 focus:ring-brand focus:outline-none" />
+/** A labelled part of the editor, with an optional line of help under it. */
+const Block = ({ label, hint, children }) => (
+  <div className="flex flex-col gap-2">
+    {label && <span className="text-[13px] font-medium text-ink">{label}</span>}
+    {children}
+    {hint && <p className="text-[12px] leading-relaxed text-muted">{hint}</p>}
+  </div>
 );
 
-const Label = ({ children }) => <span className="text-[13px] text-muted">{children}</span>;
+/** The box every step begins with: what the step says, in the size it will be read. */
+const Say = ({ value, onChange, placeholder, rows = 3 }) => (
+  <textarea autoFocus={hasKeyboard() && !value.trim()} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} rows={rows}
+            className="block w-full resize-none rounded-2xl border border-edge bg-white px-3.5 py-3 text-[15px] leading-relaxed text-ink
+                       transition-colors placeholder:text-faint hover:border-[#c9c9d1] focus:border-brand focus:ring-3 focus:ring-brand/15 focus:outline-none" />
+);
+
+/** A number that goes up and down in steps, with its unit written beside it. */
+function Stepper({ value, unit, onLess, onMore, lessDisabled, moreDisabled, lessLabel, moreLabel }) {
+  return (
+    <div className="flex w-fit items-center gap-1 rounded-full border border-edge bg-white p-0.5">
+      <button type="button" aria-label={lessLabel} disabled={lessDisabled} onClick={onLess}
+              className="grid size-8 place-items-center rounded-full text-muted hover:bg-fill hover:text-ink disabled:opacity-30">
+        <Minus aria-hidden="true" className="size-3.5" strokeWidth={2.4} />
+      </button>
+      <span className="min-w-20 text-center font-mono text-[13px] font-semibold text-ink">{value} {unit}</span>
+      <button type="button" aria-label={moreLabel} disabled={moreDisabled} onClick={onMore}
+              className="grid size-8 place-items-center rounded-full text-muted hover:bg-fill hover:text-ink disabled:opacity-30">
+        <Plus aria-hidden="true" className="size-3.5" strokeWidth={2.4} />
+      </button>
+    </div>
+  );
+}
 
 /** Who is speaking: an orb in the voice's own colours, and the voice to pick. One voice speaks the whole call. */
 function VoiceChip({ form, voices, set }) {
@@ -35,59 +81,59 @@ function VoiceChip({ form, voices, set }) {
   const options = [["", "Default voice"], ...voices.map((voice) => [voice.id, voice.name]),
                    ...(form.voice_id && !known ? [[form.voice_id, `Voice ${form.voice_id}`]] : [])];
   return (
-    <div className="flex items-center gap-1.5 rounded-full bg-canvas py-1 pr-2 pl-1">
-      <span aria-hidden="true" className="size-[26px] shrink-0 rounded-full" style={{ background: orb(form.voice_id || "default") }} />
+    <div className="flex min-w-0 items-center gap-2">
+      <span aria-hidden="true" className="size-7 shrink-0 rounded-full" style={{ background: orb(form.voice_id || "default") }} />
       <select aria-label="Voice" value={form.voice_id} onChange={(event) => set("voice_id", event.target.value)}
-              className="max-w-[150px] cursor-pointer border-0 bg-transparent text-[13px] font-semibold text-ink">
+              className="min-w-0 max-w-[170px] cursor-pointer truncate border-0 bg-transparent text-[13px] font-semibold text-ink">
         {options.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
       </select>
     </div>
   );
 }
 
-const HearButton = ({ hearing, onClick }) => (
-  <button type="button" onClick={onClick}
-          className="flex items-center gap-1.5 rounded-full bg-brand px-[18px] py-[11px] text-sm font-semibold whitespace-nowrap text-white transition-colors hover:bg-brand-hover">
-    {hearing ? <Square aria-hidden="true" className="size-3.5" fill="currentColor" /> : <Play aria-hidden="true" className="size-3.5" fill="currentColor" />}
-    {hearing ? "Stop" : "Hear it"}
-  </button>
-);
-
-/** Head of every card: what this step is, then remove and close. */
-function Head({ kicker, onRemove, onClose }) {
+/** The voice and the button to hear it, as one row. */
+function Voice({ form, voices, set, hearing, onHear }) {
   return (
-    <div className="mb-2 flex items-center gap-2">
-      <span className="text-[13px] font-medium text-faint">{kicker}</span>
+    <div className="flex items-center gap-2 rounded-2xl border border-line bg-canvas p-2 pl-3">
+      <VoiceChip form={form} voices={voices} set={set} />
       <span className="flex-1" />
-      {onRemove && <IconButton label="Remove this question" icon={Trash2} danger onClick={onRemove} />}
-      <IconButton label="Close" icon={X} onClick={onClose} />
+      <button type="button" onClick={onHear}
+              className="flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-brand px-3.5 text-[13px] font-semibold text-white transition-colors hover:bg-brand-hover">
+        {hearing ? <Square aria-hidden="true" className="size-3" fill="currentColor" /> : <Play aria-hidden="true" className="size-3" fill="currentColor" />}
+        {hearing ? "Stop" : "Hear it"}
+      </button>
     </div>
   );
 }
 
+const Note = ({ children }) => <p className="text-[12px] leading-relaxed text-muted">{children}</p>;
+
 /**
- * The editor under a selected step. Each kind of step asks for just what it is: the greeting for why it is
- * calling, a question for its wording, an answer for what counts, the close for how it ends.
+ * The editor of a selected step, in the side panel. Each kind of step asks for just what it is: why it is
+ * calling, a question for its wording, an answer for what counts, the close for how it ends. The panel's own
+ * header (name, remove, close) is drawn by the page, from `headOf`.
  */
-export function StepCard({ step, form, set, voices, questions, hearing, onHear, onClose, onRemove, onMove, onChange, onDuplicate, onAddAfter }) {
+export function StepCard({ step, form, set, voices, questions, hearing, onHear, onMove, onChange, onDuplicate, onAddAfter }) {
+  const stack = "flex flex-col gap-5";
+
+  if (step.kind === "context") {
+    return (
+      <div className={stack}>
+        <Block label="Why is the call being made?" hint="The assistant uses this to word every question and to know when the call is done.">
+          <Say value={form.purpose} onChange={(value) => set("purpose", value)} rows={6}
+               placeholder="Describe why you are calling and what the assistant should know. For example: confirm tonight’s table booking, and mention we close at 11pm." />
+          <div><RewriteButton text={form.purpose} onResult={(value) => set("purpose", value)} /></div>
+        </Block>
+      </div>
+    );
+  }
 
   if (step.kind === "open") {
     return (
-      <>
-        <Head kicker="The AI opens with…" onClose={onClose} />
-        <Say value={form.purpose} onChange={(value) => set("purpose", value)}
-             placeholder="Why is it calling? e.g. “Call customers to confirm their table booking”" />
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <VoiceChip form={form} voices={voices} set={set} />
-          <span className="flex-1" />
-          <HearButton hearing={hearing} onClick={onHear} />
-        </div>
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Label>Says it’s an AI</Label>
-          <Pills label="When it says it is an AI" options={OPTIONS.ai_disclosure.map(([value, text]) => [value, value === "at_start" ? "In the greeting" : text])}
-                 value={form.ai_disclosure} onChange={(value) => set("ai_disclosure", value)} />
-        </div>
-      </>
+      <div className={stack}>
+        <Note>The assistant says hello and who is calling, then goes on to the first step.</Note>
+        <Block label="Voice"><Voice form={form} voices={voices} set={set} hearing={hearing} onHear={onHear} /></Block>
+      </div>
     );
   }
 
@@ -95,31 +141,15 @@ export function StepCard({ step, form, set, voices, questions, hearing, onHear, 
     const minutes = Number(form.max_minutes || 4);
     const bump = (by) => set("max_minutes", String(Math.min(30, Math.max(1, minutes + by))));
     return (
-      <>
-        <Head kicker="To finish…" onClose={onClose} />
-        <div className="flex flex-wrap items-center gap-2">
-          <Label>Read the answers back</Label>
+      <div className={stack}>
+        <Block label="Repeat the answers back to them">
           <Pills label="Read the answers back" options={[["on", "Yes"], ["off", "No"]]}
                  value={form.confirm_at_end ? "on" : "off"} onChange={(value) => set("confirm_at_end", value === "on")} />
-        </div>
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Label>Wrap up after</Label>
-          <div className="flex items-center gap-1 rounded-full border border-edge p-0.5">
-            <button type="button" aria-label="Shorter" onClick={() => bump(-0.5)}
-                    className="grid size-7 place-items-center rounded-full text-muted hover:bg-fill hover:text-ink">
-              <Minus aria-hidden="true" className="size-3.5" strokeWidth={2.4} />
-            </button>
-            <span className="min-w-14 text-center font-mono text-[13px] font-semibold text-ink">{minutes} min</span>
-            <button type="button" aria-label="Longer" onClick={() => bump(0.5)}
-                    className="grid size-7 place-items-center rounded-full text-muted hover:bg-fill hover:text-ink">
-              <Plus aria-hidden="true" className="size-3.5" strokeWidth={2.4} />
-            </button>
-          </div>
-        </div>
-        <p className="mt-3 text-xs leading-relaxed text-faint">
-          It thanks them and ends the call, or sooner if every answer is in. More about how a call runs is in Settings.
-        </p>
-      </>
+        </Block>
+        <Block label="End the call after" hint="It thanks them and ends the call, or sooner if every answer is in.">
+          <Stepper value={minutes} unit="min" lessLabel="Shorter" moreLabel="Longer" onLess={() => bump(-0.5)} onMore={() => bump(0.5)} />
+        </Block>
+      </div>
     );
   }
 
@@ -130,112 +160,125 @@ export function StepCard({ step, form, set, voices, questions, hearing, onHear, 
 
   /** Move, duplicate, add another after it: along the bottom of every step that is in the line. */
   const Along = (
-    <div className="mt-3 flex items-center gap-1 border-t border-line pt-3">
+    <div className="flex items-center gap-0.5 rounded-2xl bg-canvas p-1.5">
       <IconButton label="Earlier" icon={ArrowLeft} disabled={index === 0} onClick={() => onMove(index - 1)} />
       <IconButton label="Later" icon={ArrowRight} disabled={index === questions.length - 1} onClick={() => onMove(index + 2)} />
       <IconButton label="Duplicate" icon={CopyPlus} onClick={onDuplicate} />
       <IconButton label="Add a question after this" icon={Plus} onClick={onAddAfter} />
-      <span className="ml-1 text-xs text-faint">Step {index + 1} of {questions.length}. Drag a tile to move it.</span>
+      <span className="ml-1.5 text-xs text-muted">Step {index + 1} of {questions.length}. Drag a tile to move it.</span>
     </div>
   );
 
   if (step.kind === "say") {
     return (
-      <>
-        <Head kicker="The AI tells them…" onRemove={onRemove} onClose={onClose} />
-        <Say value={question.ask} onChange={(value) => onChange({ ask: value })} rows={3}
-             placeholder="What should it say? e.g. “Just so you know, a receipt will be emailed to you.”" />
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <VoiceChip form={form} voices={voices} set={set} />
-          <span className="flex-1" />
-          <HearButton hearing={hearing} onClick={onHear} />
-        </div>
-        <p className="mt-3 text-xs leading-relaxed text-faint">
-          Said in its own words, just before the next question. It doesn’t wait for an answer.
-        </p>
+      <div className={stack}>
+        <Block label="What it says" hint="Said in its own words, just before the next question. It doesn’t wait for an answer.">
+          <Say value={question.ask} onChange={(value) => onChange({ ask: value })} rows={3}
+               placeholder="What should it say? e.g. “Just so you know, a receipt will be emailed to you.”" />
+        </Block>
+        <Voice form={form} voices={voices} set={set} hearing={hearing} onHear={onHear} />
         <Condition question={question} names={names} questions={questions} onChange={onChange} label="Only say it if…" />
         {Along}
-      </>
+      </div>
     );
   }
 
   if (step.kind === "end") {
     return (
-      <>
-        <Head kicker={question.handoff ? "The AI hands over…" : "The call ends…"} onRemove={onRemove} onClose={onClose} />
-        <Condition question={question} names={names} questions={questions} onChange={onChange} mandatory
-                   label={question.handoff ? "Hand over when…" : "End the call when…"} />
-        <div className="mt-3">
+      <div className={stack}>
+        <Condition question={question} names={names} questions={questions} onChange={onChange}
+                   label={question.handoff ? "Hand over when… (optional)" : "End the call when… (optional)"} />
+        <Block label="Last thing it says">
           <Say value={question.ask} onChange={(value) => onChange({ ask: value })} rows={2}
                placeholder={question.handoff ? "What it says last. Leave empty and it will say someone will be in touch."
                  : "What it says last. Leave empty and it will write a goodbye."} />
-        </div>
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Label>Kind of ending</Label>
-          <Pills label="Kind of ending" options={[["end", "End the call"], ["handoff", "Hand over to a person"]]}
+        </Block>
+        <Block label="What happens"
+               hint={question.handoff
+                 ? "The call is marked for a person to follow up. Nobody is phoned for you yet: it is noted on the call for someone to follow up."
+                 : "Questions after it are not asked, and don’t count against the call being complete."}>
+          <Pills label="What happens" options={[["end", "End the call"], ["handoff", "Hand over to a person"]]}
                  value={question.handoff ? "handoff" : "end"} onChange={(value) => onChange({ handoff: value === "handoff" })} />
-        </div>
-        <p className="mt-3 text-xs leading-relaxed text-faint">
-          {question.handoff
-            ? "The call is marked for a person to follow up. Nothing is dialled for you yet: it is recorded in the call."
-            : "Questions after it are not asked, and don’t count against the call being complete."}
-        </p>
+        </Block>
         {Along}
-      </>
+      </div>
+    );
+  }
+
+  if (step.kind === "loop") {
+    const times = Math.min(5, Math.max(1, Number(question.times) || 2));
+    const wording = (name) => questions.find((other) => other.save_as === name)?.ask?.trim() || name;
+    const targets = [...new Set([...earlier, question.back_to].filter(Boolean))];
+    return (
+      <div className={stack}>
+        <Condition question={question} names={names} questions={questions} onChange={onChange} mandatory label="Go back when…" />
+        <Block label="Go back to">
+          <Select aria-label="The question to go back to" value={question.back_to || ""} onChange={(event) => onChange({ back_to: event.target.value })}
+                  options={[["", targets.length ? "Choose a question…" : "No question above it yet"], ...targets.map((name) => [name, wording(name)])]} />
+        </Block>
+        <Block label="At most"
+               hint={`The answers from that question up to here are forgotten and asked again. After ${times} ${times === 1 ? "time" : "times"} it carries on, so a call can never go round for ever.`}>
+          <Stepper value={times} unit={times === 1 ? "time" : "times"} lessLabel="Fewer times" moreLabel="More times"
+                   lessDisabled={times <= 1} moreDisabled={times >= 5}
+                   onLess={() => onChange({ times: times - 1 })} onMore={() => onChange({ times: times + 1 })} />
+        </Block>
+        <Block label="What it says as it goes back">
+          <Say value={question.ask} onChange={(value) => onChange({ ask: value })} rows={2}
+               placeholder="What it says as it goes back. Leave empty and it will find its own words." />
+        </Block>
+        {Along}
+      </div>
     );
   }
 
   if (step.kind === "ask") {
     return (
-      <>
-        <Head kicker="The AI asks…" onRemove={onRemove} onClose={onClose} />
-        <Say value={question.ask} onChange={(value) => onChange({ ask: value })}
-             placeholder="What should it ask? e.g. “How many people are coming?”" />
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <VoiceChip form={form} voices={voices} set={set} />
-          <span className="flex-1" />
-          <HearButton hearing={hearing} onClick={onHear} />
-        </div>
+      <div className={stack}>
+        <Block label="What it asks">
+          <Say value={question.ask} onChange={(value) => onChange({ ask: value })}
+               placeholder="What should it ask? e.g. “How many people are coming?”" />
+        </Block>
+        <Voice form={form} voices={voices} set={set} hearing={hearing} onHear={onHear} />
         <Condition question={question} names={names} questions={questions} onChange={onChange} label="Only ask if…" />
         {Along}
-      </>
+      </div>
     );
   }
 
   // The customer's answer
   return (
-    <>
-      <Head kicker="The customer answers…" onRemove={onRemove} onClose={onClose} />
-      <Say value={question.rule || ""} onChange={(value) => onChange({ rule: value })} rows={2}
-           placeholder="What counts as a good answer? e.g. “Between 1 and 20 people. We are closed on Mondays.”" />
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Label>Answer is a</Label>
+    <div className={stack}>
+      <Block label="What counts as a good answer">
+        <Say value={question.rule || ""} onChange={(value) => onChange({ rule: value })} rows={2}
+             placeholder="e.g. “Between 1 and 20 people. We are closed on Mondays.”" />
+      </Block>
+      <Block label="Answer is a">
         <Pills label="Kind of answer" options={ANSWER_TYPES.filter(([type]) => TYPES.includes(type))} value={question.type}
                onChange={(type) => onChange({ type })} />
-      </div>
+      </Block>
       {question.type === "choice" && (
-        <div className="mt-3 flex flex-col gap-1.5">
-          <Label>Options, separated by commas</Label>
+        <Block label="Options, separated by commas">
           <TextInput value={question._optionsText ?? (question.options || []).join(", ")} placeholder="inside, outside"
                      onChange={(event) => onChange({ _optionsText: event.target.value, options: commas(event.target.value) })} />
-        </div>
+        </Block>
       )}
-      <div className="mt-3 grid grid-cols-[1fr_auto] items-end gap-3">
-        <div className="flex flex-col gap-1.5">
-          <Label>Saved as</Label>
-          <TextInput className="font-mono text-[13px]" value={question.save_as} placeholder="party_size"
-                     onChange={(event) => onChange({ save_as: event.target.value })} />
-        </div>
-        <Pills label="Required" options={[["yes", "Required"], ["no", "Optional"]]}
+      <Block label="Must they answer?">
+        <Pills label="Required" options={[["yes", "Yes"], ["no", "No, optional"]]}
                value={question.required !== false ? "yes" : "no"} onChange={(value) => onChange({ required: value === "yes" })} />
-      </div>
-      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-line pt-3">
-        <Label>If unclear, tries</Label>
-        <Pills label="Tries per question" options={TRIES} value={String(Number(form.tries_per_question) || 3)}
-               onChange={(value) => set("tries_per_question", value)} />
-        <span className="text-xs text-faint">for every question</span>
-      </div>
-    </>
+      </Block>
+      <details className="group rounded-2xl border border-line">
+        <summary className="cursor-pointer list-none px-3.5 py-3 text-[13px] font-semibold text-ink [&::-webkit-details-marker]:hidden">
+          More options
+        </summary>
+        <div className="flex flex-col gap-2 border-t border-line px-3.5 py-3.5">
+          <span className="text-[13px] font-medium text-ink">Column name in results and exports</span>
+          <TextInput className="font-mono text-[13px]" value={question.save_as} placeholder="filled in from the question"
+                     onChange={(event) => onChange({ save_as: event.target.value })}
+                     onBlur={() => { if (!question.save_as) onChange({ _reauto: true }); }} />
+          <span className="text-xs text-muted">Chosen for you from the question. You only need this if you read the results in a spreadsheet.</span>
+        </div>
+      </details>
+    </div>
   );
 }
 
@@ -250,27 +293,30 @@ function Condition({ question, names, questions, onChange, label, mandatory = fa
 
   if (!names.length) {
     return mandatory
-      ? <p className="mt-3 rounded-2xl bg-canvas px-3.5 py-3 text-[13px] text-muted">Add a question above it first: this waits on an answer.</p>
+      ? <p className="rounded-2xl bg-canvas px-3.5 py-3 text-[13px] text-muted">Add a question above it first: this waits on an answer.</p>
       : null;
   }
   if (!mandatory && !question.only_if && !open) {
     return (
       <button type="button" onClick={() => setOpen(true)}
-              className="mt-3 flex h-8 items-center gap-2 rounded-full border border-edge px-3.5 text-[13px] font-semibold text-body hover:bg-hover hover:text-ink">
-        <GitBranch aria-hidden="true" className="size-3.5" strokeWidth={2} />{label}
+              className="flex h-10 items-center justify-center gap-2 rounded-2xl border border-dashed border-brand/40 text-[13px] font-semibold text-brand-ink hover:bg-brand-wash">
+        <GitBranch aria-hidden="true" className="size-4" strokeWidth={2} />{label}
       </button>
     );
   }
   return (
-    <div className="mt-3 grid gap-3 rounded-2xl bg-canvas p-3.5 sm:grid-cols-2">
-      <div className="flex flex-col gap-1.5">
-        <Label>{mandatory ? label.replace("…", "") : label.replace("…", "")}</Label>
-        <Select aria-label="Question it waits on" options={[["", mandatory ? "Pick a question" : "Always"], ...names.map((name) => [name, `When ${name} is…`])]}
+    <div className="flex flex-col gap-3.5 rounded-2xl border border-brand/15 bg-brand-wash p-3.5">
+      <div className="flex items-center gap-2 text-[13px] font-semibold text-brand-ink">
+        <GitBranch aria-hidden="true" className="size-4" strokeWidth={2} />{label}
+      </div>
+      <div className="flex flex-col gap-2">
+        <span className="text-[13px] font-medium text-ink">{label.replace("…", "")}</span>
+        <Select aria-label="Question it waits on" options={[["", mandatory ? "Pick a question" : "Always"], ...names.map((name) => [name, `“${questions.find((other) => other.save_as === name)?.ask?.trim().slice(0, 40) || name}” is…`])]}
                 value={question.only_if || ""} onChange={(event) => onChange({ only_if: event.target.value })} />
       </div>
       {question.only_if && (
-        <div className="flex flex-col gap-1.5">
-          <Label>…any of these answers</Label>
+        <div className="flex flex-col gap-2">
+          <span className="text-[13px] font-medium text-ink">…any of these answers (separate with commas)</span>
           <TextInput aria-label="Answers it waits for" value={question._onlyIfIsText ?? (question.only_if_is || []).join(", ")} placeholder={hint}
                      onChange={(event) => onChange({ _onlyIfIsText: event.target.value, only_if_is: commas(event.target.value) })} />
         </div>

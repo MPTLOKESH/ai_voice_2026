@@ -8,10 +8,10 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from . import settings
+from . import scope
 from .models import BusinessSetup, Call, Flow
 
-__all__ = ["list_flows", "get_flow", "new_flow", "save_flow", "delete_flow", "save_call", "recent_calls", "EXAMPLE",
+__all__ = ["list_flows", "get_flow", "new_flow", "save_flow", "delete_flow", "save_call", "recent_calls", "delete_calls", "EXAMPLE",
            "write_atomic"]
 
 EXAMPLE = BusinessSetup(
@@ -29,8 +29,8 @@ EXAMPLE = BusinessSetup(
 
 def _first_setup() -> BusinessSetup:
     """What the first flow starts from: the single setup of earlier versions, or the example."""
-    if settings.CONFIG_FILE.exists():
-        return BusinessSetup.model_validate_json(settings.CONFIG_FILE.read_text(encoding="utf-8"))
+    if scope.setup_file().exists():
+        return BusinessSetup.model_validate_json(scope.setup_file().read_text(encoding="utf-8"))
     return EXAMPLE.model_copy(deep=True)
 
 
@@ -38,7 +38,7 @@ def _path(flow_id: str) -> Path:
     # The id arrives from the browser and becomes part of a file name.
     if not re.fullmatch(r"[a-z0-9]{1,32}", flow_id):
         raise KeyError(flow_id)
-    return settings.FLOWS_FOLDER / f"{flow_id}.json"
+    return scope.flows_folder() / f"{flow_id}.json"
 
 
 def _now() -> str:
@@ -85,11 +85,16 @@ def delete_flow(flow_id: str):
 
 def list_flows() -> list[Flow]:
     """Every flow, most recently edited first. The first time, the earlier single setup becomes one."""
-    if not settings.FLOWS_FOLDER.exists() or not any(settings.FLOWS_FOLDER.glob("*.json")):
-        setup = _first_setup()
-        new_flow(f"{setup.business_name} feedback" if setup.business_name else "First flow", setup)
+    # The starting flow is made once. Without the marker, deleting the last flow made the example appear again.
+    folder = scope.flows_folder()
+    marker = folder / ".seeded"
+    if not marker.exists():
+        if not any(folder.glob("*.json")) if folder.exists() else True:
+            setup = _first_setup()
+            new_flow(f"{setup.business_name} feedback" if setup.business_name else "First flow", setup)
+        write_atomic(marker, "")
     flows = []
-    for path in settings.FLOWS_FOLDER.glob("*.json"):
+    for path in folder.glob("*.json"):
         try:
             flows.append(Flow.model_validate_json(path.read_text(encoding="utf-8")))
         except ValueError:
@@ -98,7 +103,7 @@ def list_flows() -> list[Flow]:
 
 
 def save_call(call: Call) -> Path:
-    path = settings.DATA_FOLDER / "calls" / f"{call.id}.json"
+    path = scope.calls_folder() / f"{call.id}.json"
     write_atomic(path, json.dumps({
         "call": call.id,
         "flow": call.flow_id,
@@ -108,6 +113,8 @@ def save_call(call: Call) -> Path:
         "outcome": call.outcome,
         "end_reason": call.end_reason,
         "handoff": call.handoff,
+        "test": call.test,
+        "opted_out": call.opt_out,
         "answers": {k: a["value"] for k, a in call.answers.items()},
         "in_their_words": {k: a["said"] for k, a in call.answers.items()},
         "not_answered": [q.save_as for q in call.missing_required()],
@@ -123,12 +130,25 @@ def save_call(call: Call) -> Path:
     return path
 
 
+def delete_calls(ids: list[str]) -> int:
+    """Remove finished calls by id. Only plain ids count, since each becomes part of a file name. Returns how many went."""
+    folder, gone = scope.calls_folder(), 0
+    for one in dict.fromkeys(str(i) for i in ids):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", one):
+            continue
+        path = folder / f"{one}.json"
+        if path.is_file():
+            path.unlink(missing_ok=True)
+            gone += 1
+    return gone
+
+
 def recent_calls(limit: int = 20, offset: int = 0, flow: str = "", outcome: str = "", contact: str = "") -> dict:
     """Finished calls, newest first, a page at a time: {"calls": [...], "total": how many match}.
 
     `flow` keeps only one flow's calls, `contact` one contact's, `outcome` only "completed" or only "incomplete" ones.
     """
-    folder = settings.DATA_FOLDER / "calls"
+    folder = scope.calls_folder()
     if not folder.exists():
         return {"calls": [], "total": 0}
     files = sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -148,6 +168,7 @@ def recent_calls(limit: int = 20, offset: int = 0, flow: str = "", outcome: str 
         matching.append(saved)
     calls = [{"call": saved.get("call"), "flow": saved.get("flow", ""), "at": saved.get("at"),
               "outcome": saved.get("outcome"), "answers": saved.get("answers", {}), "seconds": saved.get("seconds"),
-              "summary": (saved.get("summary") or {}).get("summary"), "customer": saved.get("customer") or {}}
+              "summary": (saved.get("summary") or {}).get("summary"), "customer": saved.get("customer") or {},
+              "test": bool(saved.get("test")), "end_reason": saved.get("end_reason")}
              for saved in matching[offset:offset + limit]]
     return {"calls": calls, "total": len(matching)}

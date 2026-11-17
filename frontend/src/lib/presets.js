@@ -4,7 +4,7 @@
  * The other blocks are steps of a different kind: a message the assistant says, and an end to the call.
  * "Branch" is not added to the line: it is dropped on a question to make that question conditional.
  */
-import { CalendarDays, GitBranch, Hash, ListChecks, Megaphone, MessageSquareText, PhoneForwarded, PhoneOff, Star, ThumbsUp } from "lucide-react";
+import { CalendarDays, GitBranch, Hash, ListChecks, Megaphone, MessageSquareText, PhoneForwarded, PhoneOff, Repeat, Star, ThumbsUp } from "lucide-react";
 
 export const QUESTION_PRESETS = [
   { id: "yes_no", label: "Yes / No", icon: ThumbsUp,
@@ -27,6 +27,7 @@ export const STEP_BLOCKS = [
   { id: "say", label: "Message", icon: Megaphone, hint: "The assistant tells them something, and expects no answer" },
   { id: "end", label: "End call", icon: PhoneOff, hint: "Ends the call politely when an earlier answer matches" },
   { id: "handoff", label: "Hand over", icon: PhoneForwarded, hint: "Ends the call and marks it for a person to follow up" },
+  { id: "loop", label: "Go back", icon: Repeat, hint: "Goes back to an earlier question and asks again when an answer matches" },
 ];
 
 export const BRANCH_BLOCK = {
@@ -39,4 +40,5 @@ export const stepFields = (id) => ({
   say: { kind: "say", type: "text", required: false },
   end: { kind: "end", type: "text", required: false, handoff: false },
   handoff: { kind: "end", type: "text", required: false, handoff: true },
+  loop: { kind: "loop", type: "text", required: false, times: 2 },
 }[id]);

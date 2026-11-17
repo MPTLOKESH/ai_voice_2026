@@ -2,14 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useToast } from "../components/ui/Toasts.jsx";
 import * as api from "./api.js";
 import { blankQuestion, collect, normalise, toForm } from "./setupForm.js";
-import { tidy } from "./layout.js";
-import { CLOSE, OPEN, slug, unique } from "./thread.js";
+import { ROW_GAP, layoutMode, layoutNodes, makeRoom, tidy, unclash } from "./layout.js";
+import { CLOSE, OPEN, autoName, toName, unique } from "./thread.js";
 
 const AUTOSAVE_MS = 700;
 const HISTORY = 100;        // changes that can be undone
 const COALESCE_MS = 1000;   // typing in one box is one change, until it pauses this long
 
 /** The name a question is known by to the questions that wait on it, even while its box is being retyped. */
+// Where the opening and the finish are, as the layout wants them: null for one taken off the canvas.
+const ends = (form) => [form.show_open === false ? null : form.open_at, form.show_close === false ? null : form.close_at];
 const known = (question) => question.save_as || question._was || "";
 const isAsk = (question) => (question.kind || "ask") === "ask";
 
@@ -176,7 +178,44 @@ export function useSetup(flow, onSaved) {
   }
 
   // ── steps ──────────────────────────────────────────────────────────────────
-  const setQuestions = (changeIt, group = "") => change((current) => ({ ...current, questions: changeIt(current.questions) }), group);
+  /**
+   * The form with nothing on the canvas sitting on top of anything else. The nodes in `ids` (just added or
+   * moved) are the ones that give way, to the nearest free place; the rest stay put.
+   */
+  const spaced = (current, ids = []) => {
+    const moved = unclash(current.questions, ...ends(current), ids);
+    if (!Object.keys(moved).length) return current;
+    return {
+      ...current, open_at: moved[OPEN] || current.open_at, close_at: moved[CLOSE] || current.close_at,
+      questions: current.questions.map((one) => (moved[one._key] ? { ...one, x: moved[one._key][0], y: moved[one._key][1] } : one)),
+    };
+  };
+
+  const moved = (current, spots) => (Object.keys(spots).length ? {
+    ...current, open_at: spots[OPEN] || current.open_at, close_at: spots[CLOSE] || current.close_at,
+    questions: current.questions.map((one) => (spots[one._key] ? { ...one, x: spots[one._key][0], y: spots[one._key][1] } : one)),
+  } : current);
+
+  /** Every node laid out again in one of Tidy's ways; "horizontal" clears the places, back to one line. */
+  const tidied = (current, mode) => {
+    const found = tidy(current.questions, mode);
+    if (!found) return { ...current, open_at: [], close_at: [], questions: current.questions.map((one) => ({ ...one, x: null, y: null })) };
+    return {
+      ...current, open_at: found.open, close_at: found.close,
+      questions: current.questions.map((one) => ({ ...one, x: found.spots[one._key][0], y: found.spots[one._key][1] })),
+    };
+  };
+
+  /**
+   * Keeps the canvas neat when steps are added, removed or put in another order. A canvas that is still laid
+   * out (one line, or as Tidy left it) is laid out again the same way, so a new step simply takes its place
+   * in the line. One that was arranged by hand keeps its arrangement: a new step goes beside the step before
+   * it, and the rest of that row moves along to make room.
+   */
+  const arranged = (before, next) => next;      // nothing is placed by hand: the canvas lays the call out itself
+
+  /** Changes the steps. `ids` are the ones this adds or moves, which the others make room for. */
+  const setQuestions = (changeIt, group = "", ids = []) => change((current) => arranged(current, { ...current, questions: changeIt(current.questions) }, ids), group);
 
   /**
    * Adds a step before position `index` (the end by default). `fields` is what it starts with: a question
@@ -186,14 +225,30 @@ export function useSetup(flow, onSaved) {
     const blank = blankQuestion();
     const kind = fields.kind || "ask";
     const taken = form.questions.map((one) => one.save_as);
-    const base = kind === "say" ? "message" : kind === "end" ? (fields.handoff ? "handoff" : "end_call") : slug(fields.ask || "");
-    const made = { ...blank, ...fields, kind, save_as: unique(base, taken), _auto: kind === "ask" };
+    const base = kind === "say" ? "message" : kind === "end" ? (fields.handoff ? "handoff" : "end_call") : kind === "loop" ? "go_back" : "";
+    const made = { ...blank, ...fields, kind, save_as: base ? unique(base, taken) : autoName(fields.ask || "", taken), _auto: kind === "ask" };
     setQuestions((all) => {
       const next = [...all];
       next.splice(index ?? all.length, 0, made);
       return next;
-    });
+    }, "", [made._key]);
     return made;
+  }
+
+  /**
+   * Swaps in a whole new list of steps (what the assistant proposed), as one change. A step kept under its
+   * name keeps its key and its place on the canvas; new ones find room. Returns the keys of the new ones.
+   */
+  function replaceQuestions(list, restart = false) {
+    const old = restart ? {} : Object.fromEntries(form.questions.map((one) => [one.save_as, one]));
+    const next = list.map((question) => {
+      const was = old[question.save_as];
+      return { ...blankQuestion(), ...question, _auto: false, ...(was ? { _key: was._key, x: was.x, y: was.y } : { x: null, y: null }) };
+    });
+    const fresh = next.filter((one) => !old[one.save_as]).map((one) => one._key);
+    if (restart) change((current) => ({ ...current, open_at: [], close_at: [], questions: next }));   // a new call, laid out afresh
+    else setQuestions(() => next, "", fresh);
+    return fresh;
   }
 
   /** A copy placed straight after the original, with a saved name of its own. */
@@ -209,7 +264,7 @@ export function useSetup(flow, onSaved) {
       const next = [...all];
       next.splice(at + 1, 0, copy);
       return next;
-    });
+    }, "", [copy._key]);
     return copy;
   }
 
@@ -222,17 +277,30 @@ export function useSetup(flow, onSaved) {
     if (at < 0) return all;
     const before = all[at];
     const was = known(before);
-    const waitedOn = isAsk(before) && Boolean(was) && all.some((other, index) => index !== at && other.only_if === was);
+    const waitedOn = isAsk(before) && Boolean(was) && all.some((other, index) => index !== at && (other.only_if === was || other.back_to === was));
+    const others = all.filter((_, other) => other !== at).map((one) => one.save_as);
     const next = { ...before, ...patch };
-    if ("save_as" in patch) next._auto = false;
-    else if ("ask" in patch && next._auto && !waitedOn) {
-      next.save_as = unique(slug(next.ask), all.filter((_, other) => other !== at).map((one) => one.save_as));
+    if ("save_as" in patch) {
+      next.save_as = toName(patch.save_as);
+      next._auto = false;
+    } else if (patch._reauto) {
+      // The name box was left empty: it goes back to following the wording.
+      next.save_as = autoName(next.ask, others);
+      next._auto = true;
+    } else if ("ask" in patch && next._auto && !waitedOn && isAsk(next)) {
+      next.save_as = autoName(next.ask, others);
     }
+    delete next._reauto;
     next._was = next.save_as || was;
     const renamed = waitedOn && next.save_as && next.save_as !== was;
     return all.map((question, index) => {
       if (index === at) return next;
-      return renamed && question.only_if === was ? { ...question, only_if: next.save_as } : question;
+      if (!renamed || (question.only_if !== was && question.back_to !== was)) return question;
+      // Whatever waits on it, or goes back to it, follows its new name.
+      return {
+        ...question, only_if: question.only_if === was ? next.save_as : question.only_if,
+        back_to: question.back_to === was ? next.save_as : question.back_to,
+      };
     });
   }, `question:${key}:${Object.keys(patch).join(",")}`);
 
@@ -251,6 +319,14 @@ export function useSetup(flow, onSaved) {
       .map((other) => (name && other.only_if === name ? { ...other, only_if: "", only_if_is: [], _onlyIfIsText: undefined } : other));
   });
 
+  /** Removes several steps as one change; any left that were waiting on one of them are then always run. */
+  const removeQuestions = (keys) => setQuestions((all) => {
+    const going = new Set(keys);
+    const names = new Set(all.filter((one) => going.has(one._key) && isAsk(one)).map(known).filter(Boolean));
+    return all.filter((one) => !going.has(one._key))
+      .map((other) => (names.has(other.only_if) ? { ...other, only_if: "", only_if_is: [], _onlyIfIsText: undefined } : other));
+  });
+
   /** Moves a step to sit before position `to`, counted as it was before the move. */
   const moveQuestion = (key, to) => setQuestions((all) => {
     const from = all.findIndex((question) => question._key === key);
@@ -265,11 +341,33 @@ export function useSetup(flow, onSaved) {
   const whole = (value) => Math.round(value);
 
   /** Puts the greeting, the close, or a question somewhere on the canvas. It stays where it is in the call. */
-  const placeNode = (id, x, y) => change((current) => {
+  /** Everything where it is now, so that moving one step leaves all the others exactly where they are. */
+  const frozen = (current) => {
+    const [openAt, closeAt] = ends(current);
+    const found = layoutNodes(current.questions, openAt, closeAt);
+    const at = (id) => found.find((node) => node.id === id);
+    return {
+      ...current,
+      open_at: openAt === null ? current.open_at : [whole(at(OPEN).x), whole(at(OPEN).y)],
+      close_at: closeAt === null ? current.close_at : [whole(at(CLOSE).x), whole(at(CLOSE).y)],
+      questions: current.questions.map((one) => ({ ...one, x: whole(at(one._key).x), y: whole(at(one._key).y) })),
+    };
+  };
+
+  const placeNode = (id, x, y) => change((now) => {
+    const current = frozen(now);
     if (id === OPEN) return { ...current, open_at: [whole(x), whole(y)] };
     if (id === CLOSE) return { ...current, close_at: [whole(x), whole(y)] };
     return { ...current, questions: current.questions.map((one) => (one._key === id ? { ...one, x: whole(x), y: whole(y) } : one)) };
   }, `place:${id}`);
+
+  /** Puts several nodes somewhere at once, as one change: `spots` is {id: [x, y]}. */
+  const placeNodes = (spots) => change((now) => ({
+    ...frozen(now),
+    open_at: spots[OPEN] ? spots[OPEN].map(whole) : frozen(now).open_at,
+    close_at: spots[CLOSE] ? spots[CLOSE].map(whole) : frozen(now).close_at,
+    questions: frozen(now).questions.map((one) => (spots[one._key] ? { ...one, x: whole(spots[one._key][0]), y: whole(spots[one._key][1]) } : one)),
+  }));
 
   /** Moves a question to sit before position `to` in the call, and puts it at (x, y), as one change. */
   const relocate = (key, to, x, y) => setQuestions((all) => {
@@ -279,7 +377,7 @@ export function useSetup(flow, onSaved) {
     const [one] = next.splice(from, 1);
     next.splice(to > from ? to - 1 : to, 0, { ...one, x: whole(x), y: whole(y) });
     return next;
-  });
+  }, "", [key]);
 
   /** Lays every node out again: "horizontal" clears the places, back to one line. */
   const tidyUp = (mode) => change((current) => {
@@ -299,7 +397,8 @@ export function useSetup(flow, onSaved) {
     try {
       const { questions: found, notices } = await api.suggestQuestions(setup);
       if (found.length) {
-        setQuestions((all) => [...all, ...found.map((question) => ({ ...blankQuestion(), ...question, _auto: false, only_if: "", only_if_is: [] }))]);
+        const added = found.map((question) => ({ ...blankQuestion(), ...question, _auto: false, only_if: "", only_if_is: [] }));
+        setQuestions((all) => [...all, ...added], "", added.map((one) => one._key));
         toast(`Added ${found.length}. Edit or remove any of them.`);
       } else {
         toast("Nothing new to suggest: it already asks what suits this purpose.");
@@ -319,7 +418,7 @@ export function useSetup(flow, onSaved) {
     form, set, setup, name, setName, unsaved, saving, status, conflict, suggesting,
     canUndo: store.past.length > 0, canRedo: store.future.length > 0, undo, redo,
     save, reload, keepMine, discard, restore, suggest,
-    addQuestion, duplicateQuestion, changeQuestion, removeQuestion, moveQuestion, dependentsOf,
-    placeNode, relocate, tidyUp,
+    addQuestion, replaceQuestions, duplicateQuestion, changeQuestion, removeQuestion, removeQuestions, moveQuestion, dependentsOf,
+    placeNode, placeNodes, relocate, tidyUp,
   };
 }

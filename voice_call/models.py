@@ -24,10 +24,15 @@ class Question(BaseModel):
     kind "end"  the call ends here, once the answer it waits on (`only_if`) comes in. `ask` is what is said
                 last; empty, and the assistant writes a goodbye. With `handoff`, it is a hand-over to a
                 person: the call is marked so, and nothing is dialled yet.
+    kind "loop" the call goes back to an earlier step (`back_to`) once the answer it waits on (`only_if`)
+                comes in, and asks again from there. `ask` is what is said as it goes back. It does so at
+                most `times` times on one call, so a call can never go round for ever.
     """
 
-    kind: Literal["ask", "say", "end"] = "ask"
+    kind: Literal["ask", "say", "end", "loop"] = "ask"
     handoff: bool = False
+    back_to: str = Field("", description="leave empty")
+    times: int = Field(2, ge=1, le=5, description="leave at 2")
     # Where it sits on the studio canvas. Layout only: the call goes in the order of the list. None is
     # "wherever the default layout puts it".
     x: float | None = None
@@ -60,6 +65,10 @@ class BusinessSetup(BaseModel):
     # Where the greeting and the close sit on the studio canvas: [x, y], or empty for the default place.
     open_at: list[float] = Field(default_factory=list)
     close_at: list[float] = Field(default_factory=list)
+    # Whether the opening and the finish are shown in the studio. Taken off, they are only out of the way:
+    # a call still begins with a greeting and still ends with a goodbye.
+    show_open: bool = True
+    show_close: bool = True
 
     # personality
     tone: Tone = "friendly"
@@ -165,14 +174,19 @@ class Summary(BaseModel):
 class Call:
     setup: BusinessSetup
     customer: dict
+    owner: str = ""                              # the account it belongs to, so it can be saved by whoever closes it
     flow_id: str = ""                            # the flow it was made from, so its calls can be told apart
     said: set = field(default_factory=set)       # messages (kind "say") already told to the customer
     cut: set = field(default_factory=set)        # questions never asked because the call ended before them
     handoff: bool = False                        # ended by handing over to a person
+    test: bool = False                           # made from the studio, not to a real customer: kept out of results
+    opt_out: bool = False                        # the customer asked not to be called again
+    last_active: float = field(default_factory=time.monotonic)   # last turn, so a call nobody finished can be closed
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     step: str = "ask"                            # ask -> confirm -> finish
     answers: dict = field(default_factory=dict)  # save_as -> {"value": ..., "said": their words}
     skipped: set = field(default_factory=set)
+    loops: dict = field(default_factory=dict)    # loop step -> how many times the call has gone back through it
     failed: dict = field(default_factory=dict)
     changes: list = field(default_factory=list)  # answers revised later in the call
     transcript: list = field(default_factory=list)
@@ -230,10 +244,41 @@ class Call:
                 if q.kind == "say" and q.save_as not in self.said and self.applies(q) is True]
 
     def triggered_end(self) -> Question | None:
-        """The end step whose condition has just been met, if any. An end with no condition would end every
-        call before it began, so it never triggers."""
-        return next((q for q in self.setup.questions
-                     if q.kind == "end" and q.only_if and self.applies(q) is True), None)
+        """The end step to end the call at now, if any: one whose condition is met, or one with no condition
+        once everything before it has been dealt with."""
+        steps = self.setup.questions
+        left = {q.save_as for q in self.unanswered()}
+        for at, q in enumerate(steps):
+            if q.kind != "end":
+                continue
+            if q.only_if:
+                if self.applies(q) is True:
+                    return q
+            elif not any(earlier.save_as in left for earlier in steps[:at]):
+                return q
+        return None
+
+    def loop_range(self, loop: Question) -> list[Question]:
+        """The steps a loop goes back over: from the one it names up to the loop itself."""
+        steps = self.setup.questions
+        at = steps.index(loop)
+        start = next((i for i, q in enumerate(steps[:at]) if q.save_as == loop.back_to), None)
+        return [] if start is None else steps[start:at]
+
+    def triggered_loop(self) -> Question | None:
+        """The loop step to go back through now, if any: its condition is met, it has goes left, and the
+        call has got as far as it (nothing before it is still to be asked). A loop with no condition would
+        go back on every call, so it never triggers."""
+        waiting = {q.save_as for q in self.unanswered()}
+        steps = self.setup.questions
+        for at, q in enumerate(steps):
+            if q.kind != "loop" or not q.only_if or self.loops.get(q.save_as, 0) >= q.times:
+                continue
+            if self.applies(q) is not True or any(before.save_as in waiting for before in steps[:at]):
+                continue
+            if any(inside.kind == "ask" for inside in self.loop_range(q)):
+                return q
+        return None
 
     def add(self, speaker: str, text: str):
         self.transcript.append({"speaker": speaker, "text": text})

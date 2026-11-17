@@ -295,7 +295,7 @@ export function ContactsPage({ flows = [] }) {
             </div>
 
             {picked.size > 0 && (
-              <div className="mx-3 mb-2 flex flex-wrap items-center gap-1.5 rounded-2xl bg-ink px-3 py-2 text-[13px] text-white">
+              <div className="mx-3 mb-2 flex flex-wrap items-center gap-1.5 rounded-2xl bg-brand px-3 py-2 text-[13px] text-white">
                 <span className="px-1 font-semibold">{picked.size} picked</span>
                 <span className="flex-1" />
                 {groups.length > 0 && (

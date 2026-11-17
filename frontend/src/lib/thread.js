@@ -5,9 +5,10 @@
  * the other and works out where things sit, so the canvas only has to draw what it is given.
  */
 
-export const SLOT = 150;   // the room each step takes along the line
+export const SLOT = 296;   // the room each step takes along the line
 export const TILE = 96;    // the tile in it; the rest of the slot is the line to the next step
 
+export const CONTEXT = "context";   // "Why are we calling?": the first thing on the canvas, before the call starts
 export const OPEN = "open";
 export const CLOSE = "close";
 export const askId = (question) => `${question._key}:ask`;
@@ -19,14 +20,14 @@ const kindOf = (question) => question.kind || "ask";
  * Every step in order, each with its place along the line. A question is two steps, the assistant asking and
  * the customer answering; a message, or an end to the call, is one.
  */
-export function buildSteps(questions) {
-  const steps = [{ id: OPEN, kind: "open" }];
+export function buildSteps(questions, { open = true, close = true } = {}) {
+  const steps = [{ id: CONTEXT, kind: "context" }, ...(open ? [{ id: OPEN, kind: "open" }] : [])];
   questions.forEach((question, index) => {
     const kind = kindOf(question);
     steps.push({ id: askId(question), kind, question, index });
     if (kind === "ask") steps.push({ id: answerId(question), kind: "answer", question, index });
   });
-  steps.push({ id: CLOSE, kind: "close" });
+  if (close) steps.push({ id: CLOSE, kind: "close" });
   return steps.map((step, at) => ({ ...step, at, x: at * SLOT }));
 }
 
@@ -66,6 +67,15 @@ export function slug(text) {
   return /^[0-9]/.test(chosen) ? `q_${chosen}` : chosen;
 }
 
+/** What was typed into a saved-name box, made into a valid name: "Party size" is party_size. */
+export function toName(text) {
+  const name = text.toLowerCase().replace(/[\s-]+/g, "_").replace(/[^a-z0-9_]/g, "");
+  return /^[0-9]/.test(name) ? `q_${name}` : name;
+}
+
+/** The name a question gets from its wording, falling back to "question" when the wording has no letters to use. */
+export const autoName = (text, taken, fallback = "question") => unique(slug(text) || fallback, taken);
+
 /** `name`, or `name_2`, `name_3`… so no two questions are saved as the same thing. */
 export function unique(name, taken) {
   if (!name) return "";
@@ -89,7 +99,7 @@ export const CUSTOMER_SECONDS = 4;
 export const estimateSeconds = (questions) =>
   4 + questions.reduce((sum, question) => {
     const kind = kindOf(question);
-    if (kind === "end") return sum;
+    if (kind === "end" || kind === "loop") return sum;
     // A message is only said; a question is asked and answered.
     return sum + speakSeconds(question.ask) + (kind === "ask" ? CUSTOMER_SECONDS : 0);
   }, 0) + 3;
@@ -104,11 +114,15 @@ export const clock = (seconds) => {
 /** What is wrong with a question, in a few words, or "" if nothing: the amber dot on its tile. */
 export function questionIssue(question, index, all) {
   const kind = kindOf(question);
-  if (!question.ask.trim() && kind !== "end") return "Needs wording";
-  if (!/^[a-z_][a-z0-9_]*$/i.test(question.save_as)) return "Needs a saved name";
-  if (all.some((other, at) => at !== index && other.save_as === question.save_as)) return "Saved name is used twice";
+  if (!question.ask.trim() && kind !== "end" && kind !== "loop") return "Needs wording";
+  if (!/^[a-z_][a-z0-9_]*$/i.test(question.save_as)) return "Needs a column name";
+  if (all.some((other, at) => at !== index && other.save_as === question.save_as)) return "Column name is used twice";
   if (kind === "ask" && question.type === "choice" && (question.options || []).length < 2) return "Needs two options";
-  if (kind === "end" && !question.only_if) return "Needs a condition";
+  if (kind === "loop") {
+    const target = all.findIndex((other) => kindOf(other) === "ask" && other.save_as === question.back_to);
+    if (target < 0 || target >= index) return "Choose where it goes back to";
+    if (!question.only_if) return "Needs a condition";
+  }
   if (question.only_if) {
     // Only a question asked above it can be waited on.
     const parent = all.findIndex((other) => kindOf(other) === "ask" && other.save_as === question.only_if);

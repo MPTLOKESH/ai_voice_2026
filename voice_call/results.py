@@ -12,15 +12,29 @@ import statistics
 from collections import Counter
 from datetime import datetime, timedelta
 
-from . import settings
+from . import scope
 from .models import Flow
 
 TEXT_SAMPLE = 25            # free-text answers listed per question
 WEEK = timedelta(days=7)
 
 
-def _saved_calls():
-    folder = settings.DATA_FOLDER / "calls"
+def _saved_calls(tests: bool = False):
+    """Every saved call. Calls made from the studio's test bench are left out unless `tests`."""
+    for call in _all_saved():
+        if tests or not call.get("test"):
+            yield call
+
+
+def _safe(value):
+    """A cell a spreadsheet will show as text. One that starts with = + - @ is read as a formula, and an
+    answer is only whatever the customer was heard to say."""
+    text = "" if value is None else str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") and not text.lstrip("+").isdigit() else text
+
+
+def _all_saved():
+    folder = scope.calls_folder()
     if not folder.exists():
         return
     for path in folder.glob("*.json"):
@@ -37,12 +51,31 @@ def _when(call: dict) -> datetime | None:
         return None
 
 
-def stats() -> dict:
+def _days(count: int) -> list[str]:
+    """The last `count` calendar days as ISO dates, oldest first, ending today."""
+    today = datetime.now().date()
+    return [(today - timedelta(days=back)).isoformat() for back in range(count - 1, -1, -1)]
+
+
+def _daily(calls, count: int) -> list[dict]:
+    """Calls and completed calls for each of the last `count` days (a day with no calls is a zero, not a gap)."""
+    days = {day: {"day": day, "calls": 0, "completed": 0} for day in _days(count)}
+    for call in calls:
+        at = _when(call)
+        one = days.get(at.date().isoformat()) if at else None
+        if one:
+            one["calls"] += 1
+            one["completed"] += call.get("outcome") == "completed"
+    return list(days.values())
+
+
+def stats(tests: bool = False) -> dict:
     """Per flow: calls, completed, average length. And the same for the last seven days across all flows."""
     flows: dict[str, dict] = {}
     week = {"calls": 0, "completed": 0, "seconds": 0.0}
     since = datetime.now() - WEEK
-    for call in _saved_calls():
+    saved = list(_saved_calls(tests))
+    for call in saved:
         done = call.get("outcome") == "completed"
         seconds = float(call.get("seconds") or 0)
         if call.get("flow"):
@@ -56,11 +89,13 @@ def stats() -> dict:
             week["calls"] += 1
             week["completed"] += done
             week["seconds"] += seconds
-    for one in flows.values():
+    for flow_id, one in flows.items():
         one["average_seconds"] = round(one.pop("seconds") / one["calls"], 1) if one["calls"] else 0
+        one["daily"] = [day["calls"] for day in _daily((c for c in saved if c.get("flow") == flow_id), 7)]
     return {"flows": flows, "week": {
         "calls": week["calls"], "completed": week["completed"],
-        "average_seconds": round(week["seconds"] / week["calls"], 1) if week["calls"] else 0}}
+        "average_seconds": round(week["seconds"] / week["calls"], 1) if week["calls"] else 0},
+        "daily": _daily(saved, 7)}
 
 
 def _numbers(values: list[str]) -> list[float]:
@@ -97,9 +132,9 @@ def _question_results(question: dict, values: list[str], calls: int) -> dict:
     return out
 
 
-def flow_results(flow: Flow, waiting: dict | None = None) -> dict:
+def flow_results(flow: Flow, waiting: dict | None = None, tests: bool = False) -> dict:
     """Everything the results page shows for one flow."""
-    mine = sorted((call for call in _saved_calls() if call.get("flow") == flow.id), key=lambda c: c.get("at") or "",
+    mine = sorted((call for call in _saved_calls(tests) if call.get("flow") == flow.id), key=lambda c: c.get("at") or "",
                   reverse=True)
     done = [call for call in mine if call.get("outcome") == "completed"]
     seconds = [float(call.get("seconds") or 0) for call in mine]
@@ -124,6 +159,7 @@ def flow_results(flow: Flow, waiting: dict | None = None) -> dict:
         "calls": len(mine), "completed": len(done),
         "average_seconds": round(sum(seconds) / len(seconds), 1) if seconds else 0,
         "last_call": mine[0].get("at", "") if mine else "",
+        "daily": _daily(mine, 14),
         "questions": per_question,
         "recent": [{"call": call.get("call"), "at": call.get("at"), "outcome": call.get("outcome"),
                     "seconds": call.get("seconds"), "customer": call.get("customer") or {},
@@ -132,9 +168,9 @@ def flow_results(flow: Flow, waiting: dict | None = None) -> dict:
     }
 
 
-def flow_csv(flow: Flow) -> str:
+def flow_csv(flow: Flow, tests: bool = False) -> str:
     """One row per call: when, who, how it ended, and a column for each question's answer."""
-    mine = sorted((call for call in _saved_calls() if call.get("flow") == flow.id), key=lambda c: c.get("at") or "")
+    mine = sorted((call for call in _saved_calls(tests) if call.get("flow") == flow.id), key=lambda c: c.get("at") or "")
     names = [q.save_as for q in (flow.published or flow.setup).questions if q.kind == "ask"]
     for call in mine:
         for name in call.get("answers", {}):
@@ -145,10 +181,11 @@ def flow_csv(flow: Flow) -> str:
     writer.writerow(["call", "when", "name", "phone", "outcome", "seconds", *names, "summary"])
     for call in mine:
         who = call.get("customer") or {}
-        writer.writerow([call.get("call"), call.get("at"), who.get("name", ""), who.get("phone", ""),
-                         call.get("outcome", ""), call.get("seconds", ""),
-                         *[call.get("answers", {}).get(name, "") for name in names],
-                         (call.get("summary") or {}).get("summary", "")])
+        writer.writerow([_safe(cell) for cell in (
+            call.get("call"), call.get("at"), who.get("name", ""), who.get("phone", ""),
+            call.get("outcome", ""), call.get("seconds", ""),
+            *[call.get("answers", {}).get(name, "") for name in names],
+            (call.get("summary") or {}).get("summary", ""))])
     return out.getvalue()
 
 

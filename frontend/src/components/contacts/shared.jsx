@@ -10,7 +10,7 @@ export function Steps({ steps, at }) {
       {steps.map((label, index) => (
         <li key={label} className={cn("flex items-center gap-1.5", index === at ? "text-ink" : index < at ? "text-brand-ink" : "text-faint")}>
           <span className={cn("grid size-5 place-items-center rounded-full text-[11px] font-semibold",
-                              index < at ? "bg-brand text-white" : index === at ? "bg-ink text-white" : "bg-fill text-faint")}>
+                              index < at ? "bg-brand text-white" : index === at ? "bg-brand-soft text-brand-ink ring-2 ring-brand" : "bg-fill text-faint")}>
             {index < at ? <Check aria-hidden="true" className="size-3" strokeWidth={3} /> : index + 1}
           </span>
           {label}

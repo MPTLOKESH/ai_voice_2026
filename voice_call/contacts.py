@@ -13,9 +13,8 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime
 
-from . import settings
+from . import scope
 
-DB_FILE = settings.DATA_FOLDER / "contacts.db"
 MAX_IMPORT = 50_000            # rows in one import or sync
 DEFAULT_COUNTRY = "+91"        # put in front of numbers written without one
 
@@ -63,8 +62,9 @@ def _id() -> str:
 
 @contextmanager
 def _db():
-    DB_FILE.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(DB_FILE, timeout=10)
+    path = scope.contacts_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path, timeout=10)
     con.row_factory = sqlite3.Row
     try:
         con.execute("PRAGMA foreign_keys = ON")

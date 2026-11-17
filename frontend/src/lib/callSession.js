@@ -12,7 +12,7 @@ import * as api from "./api.js";
 import { Mic, Player, audioContext } from "./audio.js";
 import { VoiceMic } from "./vad.js";
 
-const NO_MIC = "No microphone available. A call is spoken, so check this page is allowed to use yours.";
+const NO_MIC = "The microphone is blocked. Click the lock icon beside the address, allow the microphone, then try again.";
 const TURN_EARLY = 0.12;              // hand over while the last breath is still trailing off
 
 const INITIAL = {
@@ -40,6 +40,7 @@ export class CallSession {
     this.setup = null;
     this.flowId = "";                 // the flow being tested, so the saved call says which one it was
     this.callId = null;
+    this.lastCallId = null;           // the call that has just ended, so its summary can still be looked up
     this.speakOutLoud = true;
     this.player = null;
     this.mic = null;
@@ -50,6 +51,14 @@ export class CallSession {
     this.deadline = null;             // ends a call that goes quiet past its time limit
     this.talkedOver = false;          // the next turn interrupted the assistant, and the server must know
     this.clock = null;
+
+    // Closing the tab mid-call: tell the server, or the call is never saved. sendBeacon outlives the page.
+    if (typeof window !== "undefined") {
+      window.addEventListener("pagehide", () => {
+        if (!this.callId) return;
+        try { navigator.sendBeacon("/api/call/end", new Blob([JSON.stringify({ call: this.callId })], { type: "application/json" })); } catch {}
+      });
+    }
   }
 
   // ── for React ────────────────────────────────────────────────────────────
@@ -318,6 +327,8 @@ export class CallSession {
   }
 
   ended(state) {
+    try { localStorage.setItem("voice-call-tested", "1"); } catch { /* optional */ }
+    this.lastCallId = this.callId;
     this.callId = null;
     this.inFlight = null;
     clearTimeout(this.deadline);
@@ -331,17 +342,22 @@ export class CallSession {
       phase: "ended", micOpen: false, call: state,
       outcome: { outcome: state.outcome, end_reason: state.end_reason }, summary: "Writing a summary…",
     });
-    setTimeout(() => this.refreshSummary(), 1200);
+    this.refreshSummary(this.lastCallId);
   }
 
-  async refreshSummary() {
-    try {
-      // This call's own entry: with other calls finishing too, the newest one need not be it.
-      const { calls } = await api.recentCalls({ flow: this.flowId, limit: 5 });
-      this.set({ summary: calls.find((one) => one.call === this.callId)?.summary || "" });
-    } catch {
-      this.set({ summary: "" });
+  /** The summary is written by the AI after the call is saved, which takes a few seconds: look a few times. */
+  async refreshSummary(id, tries = 10) {
+    for (let attempt = 0; attempt < tries; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 1200 : 1500));
+      if (this.callId || this.lastCallId !== id) return;           // a new call began: this one is no longer on screen
+      try {
+        // This call's own entry: with other calls finishing too, the newest one need not be it.
+        const { calls } = await api.recentCalls({ limit: 10 });
+        const mine = calls.find((one) => one.call === id);
+        if (mine?.summary) return this.set({ summary: mine.summary });
+      } catch { /* try again */ }
     }
+    if (this.lastCallId === id) this.set({ summary: "" });
   }
 
   reset() {

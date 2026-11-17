@@ -1,24 +1,29 @@
-import { AudioWaveform, BarChart3, Cpu, History, LayoutGrid, Mic, Phone, Plus, Users, Volume2 } from "lucide-react";
+import { AudioWaveform, BarChart3, Cpu, History, LayoutGrid, LogOut, Mic, Phone, Plus, UserRound, Users, Volume2 } from "lucide-react";
 import { cn } from "../../lib/cn.js";
 import { Menu } from "../ui/Menu.jsx";
 
 export const PAGES = [
-  { id: "drafts", path: "/", label: "Drafts", icon: LayoutGrid },
-  { id: "studio", path: "/studio", label: "Studio", icon: AudioWaveform },
-  { id: "voices", path: "/voices", label: "Voices", icon: Mic },
+  { id: "drafts", path: "/", label: "Flows", icon: LayoutGrid },
   { id: "contacts", path: "/contacts", label: "Contacts", icon: Users },
-  { id: "call", path: "/call", label: "Test call", icon: Phone },
   { id: "history", path: "/history", label: "History", icon: History },
-  // A page for one flow, reached from its card: no place of its own in the rail.
+  // The pages of one flow (Build, Test, Send, Results) are reached from the bar across the top of a flow, and
+  // the voices from its settings: none has a place of its own in the rail.
+  { id: "studio", path: "/studio", label: "Build", icon: AudioWaveform, hidden: true },
+  { id: "call", path: "/call", label: "Test", icon: Phone, hidden: true },
   { id: "results", path: "/results", label: "Results", icon: BarChart3, hidden: true },
+  { id: "voices", path: "/voices", label: "Voices", icon: Mic, hidden: true },
+  { id: "account", path: "/account", label: "Account", icon: UserRound, hidden: true },
 ];
+
+/** Which rail item a page belongs under: every page of a flow sits under Flows. */
+export const railItem = (page) => (["studio", "call", "results", "voices"].includes(page) ? "drafts" : page);
 
 function PageLink({ page, active, callLive, onNavigate, className, children }) {
   return (
     <a href={page.path} onClick={(event) => { event.preventDefault(); onNavigate(page.id); }}
        aria-current={active ? "page" : undefined} className={className}>
       {children}
-      {page.id === "call" && callLive && <span className="sr-only">(call in progress)</span>}
+      {page.id === "drafts" && callLive && <span className="sr-only">(call in progress)</span>}
     </a>
   );
 }
@@ -42,15 +47,15 @@ const Mark = () => (
  * The rail down the left on wide screens: the mark, the add button, the pages, and who is calling with the
  * services in use behind them. On phones the pages move to a tab bar along the bottom.
  */
-export function Rail({ page, onNavigate, assistant, callLive, onNewFlow, model, speech }) {
-  const initial = (assistant || "A")[0].toUpperCase();
+export function Rail({ page, onNavigate, assistant, callLive, onNewFlow, model, speech, user, onSignOut, onAccount }) {
+  const initial = ((user?.name || user?.email || assistant || "A")[0]).toUpperCase();
 
   return (
     <>
       <nav aria-label="Pages"
            className="hidden w-[76px] shrink-0 flex-col items-center gap-1 border-r border-line bg-white py-3 lg:flex">
         <Mark />
-        <button type="button" onClick={onNewFlow} aria-label="New flow" title="New flow"
+        <button type="button" onClick={onNewFlow} aria-label="New flow" title="Start a new flow"
                 className="mb-3 grid size-10 place-items-center rounded-full bg-brand text-white shadow-[0_4px_12px_rgb(110_76_245/0.35)] transition-colors hover:bg-brand-hover">
           <Plus aria-hidden="true" className="size-[18px]" strokeWidth={2.4} />
         </button>
@@ -65,7 +70,7 @@ export function Rail({ page, onNavigate, assistant, callLive, onNewFlow, model, 
               <span className={cn("relative grid h-8 w-10 place-items-center rounded-[10px] transition-colors",
                                   active ? "bg-brand-soft" : "group-hover:bg-fill")}>
                 <Icon aria-hidden="true" className="size-5" strokeWidth={1.8} />
-                {one.id === "call" && callLive && <LiveDot className="absolute top-0 right-0.5" />}
+                {one.id === "drafts" && callLive && <LiveDot className="absolute top-0 right-0.5" />}
               </span>
               {one.label}
             </PageLink>
@@ -77,7 +82,23 @@ export function Rail({ page, onNavigate, assistant, callLive, onNewFlow, model, 
         <Menu label="Who is calling, and the services in use" side="beside"
               buttonClassName="grid size-[34px] place-items-center rounded-full bg-gradient-to-br from-[#f3dcc4] to-[#e8805c] text-[12px] font-semibold text-ink"
               trigger={initial}>
-          <p className="px-2.5 pt-1.5 pb-1 text-[11px] font-medium tracking-wide text-faint uppercase">Services in use</p>
+          {user && (
+            <div className="border-b border-line px-2.5 pt-1.5 pb-2.5">
+              {user.name && <p className="truncate text-[14px] font-semibold text-ink">{user.name}</p>}
+              <p className="truncate text-[13px] text-muted">{user.email}</p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                <button type="button" onClick={onAccount}
+                        className="inline-flex items-center gap-1.5 rounded-full bg-brand-soft px-3 py-1.5 text-[13px] font-medium text-brand-ink transition-colors hover:bg-[#e6dfff]">
+                  <UserRound aria-hidden="true" className="size-3.5" strokeWidth={2} /> Account
+                </button>
+                <button type="button" onClick={onSignOut}
+                        className="inline-flex items-center gap-1.5 rounded-full bg-fill px-3 py-1.5 text-[13px] font-medium text-ink transition-colors hover:bg-active">
+                  <LogOut aria-hidden="true" className="size-3.5" strokeWidth={2} /> Sign out
+                </button>
+              </div>
+            </div>
+          )}
+          <p className="px-2.5 pt-2 pb-1 text-[11px] font-medium tracking-wide text-faint uppercase">Services in use</p>
           <dl>
             {[[Cpu, "Thinking", model || "—"], [Volume2, "Hearing · speaking", speech || "Shown once a call starts"]]
               .map(([Icon, label, value]) => (
@@ -95,7 +116,7 @@ export function Rail({ page, onNavigate, assistant, callLive, onNewFlow, model, 
 
       <nav aria-label="Pages"
            className="glass fixed inset-x-0 bottom-0 z-30 border-t border-line pb-[env(safe-area-inset-bottom)] lg:hidden">
-        <ul className="mx-auto grid h-14 max-w-lg grid-cols-6">
+        <ul className="mx-auto grid h-14 max-w-lg grid-cols-3">
           {PAGES.filter((one) => !one.hidden).map((one) => {
             const active = page === one.id;
             const Icon = one.icon;
@@ -106,7 +127,7 @@ export function Rail({ page, onNavigate, assistant, callLive, onNewFlow, model, 
                                         active ? "text-brand" : "text-muted hover:text-ink")}>
                   <span className="relative">
                     <Icon aria-hidden="true" className="size-5" strokeWidth={active ? 2 : 1.6} />
-                    {one.id === "call" && callLive && <LiveDot className="absolute -top-0.5 -right-1" />}
+                    {one.id === "drafts" && callLive && <LiveDot className="absolute -top-0.5 -right-1" />}
                   </span>
                   {one.label}
                 </PageLink>

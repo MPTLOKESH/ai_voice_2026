@@ -4,6 +4,8 @@
  * setup is what the server stores. `toForm` goes one way, `collect` the other.
  */
 
+import { autoName } from "./thread.js";
+
 export const TYPES = ["text", "number", "date", "time", "yes_no", "choice"];
 
 // Every field, by kind, with what it falls back to when left empty. Each key is the setting's own name.
@@ -14,7 +16,7 @@ const NUMBERS = { max_minutes: 4, speaking_speed: 1, tries_per_question: 3, sile
 // The server refuses anything outside these, so a number typed past the end is brought back inside.
 const LIMITS = { max_minutes: [1, 30, 0.5], speaking_speed: [0.7, 1.2, 0.05], tries_per_question: [1, 5, 1],
                  silences_before_ending: [1, 5, 1], wait_after_speech_ms: [300, 1500, 1] };
-const SWITCHES = { confirm_at_end: true, allow_interruptions: true };
+const SWITCHES = { confirm_at_end: true, allow_interruptions: true, show_open: true, show_close: true };
 const LINES = ["business_info", "rules"];
 const COMMAS = ["other_languages"];
 
@@ -48,14 +50,22 @@ let keys = 0;
 const withKey = (question) => ({ ...question, _key: question._key ?? `q${++keys}`, _auto: question._auto ?? false });
 
 // `_auto`: the saved name still follows the wording, until someone types a name of their own.
-// `kind`: "ask" (a question), "say" (a message, no answer) or "end" (ends the call once its condition is met).
+// `kind`: "ask" (a question), "say" (a message, no answer), "end" (ends the call once its condition is met)
+// or "loop" (goes back to the step `back_to` once its condition is met, at most `times` times).
 export const blankQuestion = () => withKey({
-  _auto: true, kind: "ask", handoff: false,
+  _auto: true, kind: "ask", handoff: false, back_to: "", times: 2,
   save_as: "", ask: "", type: "text", rule: "", options: [], required: true, only_if: "", only_if_is: [],
 });
 
 /** The steps that are questions: what gets answered. */
 export const asks = (questions) => questions.filter((question) => (question.kind || "ask") === "ask");
+
+/** A question saved without a usable name (an older one) is given one from its wording, so nothing waits on it. */
+function named(questions) {
+  const valid = /^[a-z_][a-z0-9_]*$/i;
+  return questions.map((question, at) => (valid.test(question.save_as || "") || (question.kind || "ask") !== "ask" ? question
+    : { ...question, save_as: autoName(question.ask || "", questions.filter((_, other) => other !== at).map((one) => one.save_as)) }));
+}
 
 /** A setup as the form shows it. */
 export function toForm(setup) {
@@ -70,7 +80,7 @@ export function toForm(setup) {
     ...Object.fromEntries(Object.entries(SWITCHES).map(([name, fallback]) => [name, setup[name] ?? fallback])),
     ...Object.fromEntries(LINES.map((name) => [name, (setup[name] || []).join("\n")])),
     ...Object.fromEntries(COMMAS.map((name) => [name, (setup[name] || []).join(", ")])),
-    questions: (setup.questions || []).map(withKey),
+    questions: named((setup.questions || []).map(withKey)),
     open_at: pair(setup.open_at), close_at: pair(setup.close_at),
   };
 }
@@ -87,6 +97,7 @@ export function normalise(setup) {
     open_at: pair(setup.open_at), close_at: pair(setup.close_at),
     questions: (setup.questions || []).map((question) => ({
       kind: question.kind || "ask", handoff: Boolean(question.handoff), x: spot(question.x), y: spot(question.y),
+      back_to: question.kind === "loop" ? question.back_to || "" : "", times: Math.min(5, Math.max(1, Number(question.times) || 2)),
       save_as: question.save_as, ask: question.ask, type: question.type, rule: question.rule || "",
       options: question.options || [], required: question.required !== false,
       only_if: question.only_if || "", only_if_is: question.only_if ? question.only_if_is || [] : [],
@@ -122,15 +133,16 @@ export function problems(setup) {
   setup.questions.forEach((question, at) => {
     const name = question.save_as || "unnamed";
     const kind = question.kind || "ask";
-    if (!question.ask.trim() && kind !== "end") found.push(kind === "say" ? "Every message needs wording." : "Every question needs wording.");
+    if (!question.ask.trim() && kind !== "end" && kind !== "loop") found.push(kind === "say" ? "Every message needs wording." : "Every question needs wording.");
     if (!/^[a-z_][a-z0-9_]*$/i.test(question.save_as)) {
       found.push(`"${name}": the saved name needs letters, numbers and underscores.`);
     }
     if (kind === "ask" && question.type === "choice" && (question.options || []).length < 2) {
       found.push(`"${name}": a choice needs at least two options.`);
     }
-    if (kind === "end" && !question.only_if) found.push(`"${name}": an end step needs a condition, or it would end every call.`);
     const above = setup.questions.slice(0, at).filter((other) => (other.kind || "ask") === "ask").map((other) => other.save_as);
+    if (kind === "loop" && !question.only_if) found.push(`"${name}": a go-back step needs a condition, or it would go back on every call.`);
+    if (kind === "loop" && !above.includes(question.back_to)) found.push(`"${name}": choose a question above it to go back to.`);
     if (question.only_if && !above.includes(question.only_if)) {
       found.push(`"${name}" can only depend on a question above it.`);
     } else if (question.only_if && !question.only_if_is.length) {
